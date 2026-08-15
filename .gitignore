@@ -11,6 +11,10 @@ docs/DEVELOPER.md
 docs/AI-CONTEXT.md
 docs/RELEASE-PLAN.md
 docs/RELEASE-TODO.md
+docs/NPM-CREDENTIALS.md
 
 # 导出产物
 *.zip
+.npmrc
+docs/MAINTENANCE.md
+docs/contributing.md

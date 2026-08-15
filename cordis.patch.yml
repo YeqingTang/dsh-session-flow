@@ -1,0 +1,7 @@
+# dsh-session-flow bundle patch: mounts the session-flow plugin over the web
+# profile. The host half registers the /api/session-flow route; the client
+# half contributes the "会话流" sidebar entry and the center-column view.
+
+- insert:
+    - id: dsh-session-flow
+      name: dsh-session-flow

@@ -1,0 +1,16 @@
+# 依赖与构建
+node_modules/
+*.log
+
+# 本地开发验证（含本机测试会话/路径，不进公开仓库）
+verify/
+!verify/.gitkeep
+
+# 本地留存文档（个人开发用，不进公开仓库）
+docs/DEVELOPER.md
+docs/AI-CONTEXT.md
+docs/RELEASE-PLAN.md
+docs/RELEASE-TODO.md
+
+# 导出产物
+*.zip

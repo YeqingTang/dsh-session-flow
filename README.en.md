@@ -1,125 +1,72 @@
-# dsh-session-flow
+# dsh-session-flow — session review & archive plugin for DSH
 
 > **English** | [中文](README.md)
 
-> A DSH plugin that redesigns the session information flow: turning raw session message streams into a **foldable information flow with session-level summaries** — a cross-session archive cabinet.
+Restructures DSH session message streams into a **foldable information flow with session-level summaries**: every session becomes an archive card for cross-workspace review, search, and export. The built-in session views (Trajectory / Chat) excel at the microscopic inspection of what is happening right now; this plugin fills the missing layer of **post-hoc review / archival / insight**.
 
-**In one sentence**: Too many sessions, too slow to review? This plugin turns every DSH session into an "archive card" — understand in seconds what a session did, where it got to, which tools it used, which files it touched — and track running sessions in real time.
+## Interface tour
 
-[DeepSeek Harness (dsh)](https://github.com/deepseek-ai/dsh) is an AI agent workbench. Its built-in session views (Trajectory / Chat) excel at the microscopic inspection of *what is happening right now*; this plugin fills the missing layer of **post-hoc review / archival / insight**: a cross-session, cross-workspace historical perspective.
-
----
-
-## What it does
-
-| Feature | Description |
+| Overview workbench | Session Flow tab |
 |---|---|
-| 🗂️ **Session overview workbench** | All sessions as cards: title, workspace, status (running / ended / empty / subagent), error count, duration, created time; sortable and filterable — find the target session at a glance |
-| 🔍 **Structured search** | `tool:pwsh` finds sessions that used a tool, `file:src/` finds sessions that touched a path, `err:` finds sessions with errors, or just free-text search (title / tool name / file path) |
-| 📜 **Folded detail view** | Turns are collapsed by default into a two-line "user message + conclusion" summary; expand to view in **true chronological order**: thinking → tool calls → replies, exactly as they happened — never re-stacked by type |
-| 🧭 **Four-tab navigation** | Right panel: user message outline / tool call list / error list / in-session full-text search — click any entry to auto-expand the turn, scroll to it, and flash-highlight it |
-| 🌳 **Subagent lineage tree** | Tree view of parent-session → subagent relationships; subagent details reuse the folded rendering; one-click "view subagent" from tool rows |
-| 📝 **Dual-mode summary** | Auto summary card per session: **rule mode** (zero cost, assembled live: task count / first task / latest conclusion / top tools) + **LLM mode** (one-click, uses the DSH model, summarizes task by task; cached on disk, prompts regeneration when new conversation arrives) |
-| ⚡ **Live tracking** | Click "Live" on a running session: auto-refresh every 3 seconds, the active turn gets a breathing highlight + a "generating…" indicator — no page refresh needed |
-| 📦 **ZIP chunked export** | One-click export of the full session as a readable Markdown report (`00-overview.md` + timeline chunks, ≤700KB each), packed as a ZIP — great for archival, sharing, or handoff |
-| 🧹 **Cache management** | Visual view and scoped cleanup of index/timeline caches (only this plugin's caches; never touches DSH data) |
+| ![Overview workbench](assets/screenshots/overview.png) | ![Session Flow tab](assets/screenshots/session-flow-tab.png) |
+| Session cards with status, conclusion line, first task; hover ✎ to rename inline | "Session Flow" tab embedded in the native conversation page |
 
-## Installation
+| Turn rail | Cross-session full-text search |
+|---|---|
+| ![Turn rail](assets/screenshots/turn-rail.png) | ![Cross-session full-text search](assets/screenshots/fulltext-search.png) |
+| Turn navigation on the left of the Chat tab: collapsed dashes ⇄ expanded cards, one-click jump | Free text in the overview triggers full-text mode: recall across workspaces, hits jump & locate |
 
-### Option 1: Install from the plugin market (recommended)
+| Dock details right | Folded detail view |
+|---|---|
+| ![Dock details right](assets/screenshots/dock-right.png) | ![Folded detail view](assets/screenshots/folded-detail.png) |
+| Dock the detail into the official right panel: conversation + flow side by side, drag to resize | Turns folded by default; expand in true chronological order; four-tab navigation |
 
-Open "Plugin Market" in the DSH Web GUI sidebar, search for `dsh-session-flow`, and click install.
+## Features
 
-### Option 2: Install via npm
+| Capability | Description |
+|---|---|
+| Overview workbench | Session cards (status / errors / duration) + conclusion line; sort, filter, workspace tabs |
+| Structured search | `tool:` `file:` `err:` prefixes + free text |
+| Folded detail view | Turns collapse to "user message + conclusion"; expand in true chronological order; on-demand loading |
+| Four-tab navigation | User messages / tools / errors / search, click to locate & highlight |
+| Lineage tree | Subagent derivation tree (offline archive + live runtime channels) |
+| Dual-mode summary | Rule summary (zero cost, assembled live) + LLM summary (cached, prompts regeneration) |
+| Live tracking | 3s polling for running sessions, breathing highlight + generating indicator |
+| ZIP export | Overview + chunked timeline as a Markdown report |
+| Session rename | Custom titles as a display-layer overlay, restore anytime |
+| Session Flow tab | Embedded tab on the native conversation page, cross-navigates with the workbench |
+| Turn rail | Turn jumps on the left of the Chat tab (Chat tab only) |
+| Cross-session full-text search | Content-level recall, hits jump into the Session Flow tab and locate |
+| Dock details right | Side-by-side with the main conversation |
+| Cache management | View & clean index/timeline caches (never touches DSH data) |
+
+## Install
 
 ```sh
+# From the plugin market (search dsh-session-flow), or:
 dsh plugin add dsh-session-flow
-```
-
-### Option 3: Install from GitHub
-
-```sh
 dsh plugin add github:YeqingTang/dsh-session-flow
 ```
 
-### Option 4: Install from source (development)
+After installing: **restart the DSH Web service** and **hard-refresh the browser** (Ctrl+Shift+R). Success shows the "Session Flow" entry in the sidebar.
 
-```sh
-git clone https://github.com/YeqingTang/dsh-session-flow.git
-dsh plugin add link:/path/to/dsh-session-flow
-```
+Requirements: DSH Web GUI (latest stable); Node.js ≥ 22.19 (built-in zstd decoding, zero third-party dependencies).
 
-### After installing
+## Usage
 
-Whatever method you chose: **restart the DSH Web service**, then **hard-refresh the browser** (Ctrl+Shift+R / Ctrl+F5).
-Installation succeeds when the "**Session Flow**" entry appears in the sidebar.
-
-### Requirements
-
-- DSH Web GUI (latest stable)
-- Node.js ≥ 22.19 (uses built-in zstd decoding, zero third-party dependencies)
-
-## Usage guide
-
-### 1. Open the overview
-
-Click "**Session Flow**" in the sidebar → all sessions are shown as cards. Supports:
-
-- **Search**: the top search box mixes structured prefixes and free text:
-
-  | Syntax | What it does | Example |
-  |---|---|---|
-  | `tool:xxx` | Sessions that used a tool | `tool:pwsh` |
-  | `file:xxx` | Sessions that touched a path | `file:src/` |
-  | `err:` | Sessions with errors | `err:` |
-  | free text | Title / workspace / tool name / file path | `session flow` |
-
-- **Workspace tabs**: filter by workspace; **sort**: recently run (default) / recently created / oldest first / most tools / longest
-- **Stats bar**: tool usage Top 6 + one-click filter for problem sessions (with errors)
-
-### 2. View a session
-
-Click any session card:
-
-- **Turns collapsed by default**: only "👤 user message + ✅ conclusion" summaries are shown; click a turn header to expand
-- **Expanded**: view in true chronological order — thinking (🧠), tool calls (🛠️, with args / result / duration / error marks), assistant replies
-- **Right navigation**: four tabs — user messages / tools / errors / search; click to locate in the content area (selected turn gets a blue highlight)
-- **Summary card**: rule summary at top; click "Generate LLM summary" for an intelligent summary (model quota consumed on demand)
-
-### 3. Track a live session
-
-When a session is **running** (a "running" badge in the header):
-
-1. Click the "**Live**" button in the top-right
-2. The timeline auto-refreshes (every 3 s); the active turn gets a **green breathing highlight** + a "generating…" indicator at the bottom
-3. Click "Exit live" to return to the archived view
-
-### 4. Export a report
-
-In the detail view, click "**Export report (ZIP)**" → download `session-report-<title>.zip`, unzip to get:
-
-```
-00-overview.md           # session metadata + summary + tool stats + artifact list + chunk guide
-01-timeline-turn1-25.md  # per-turn timeline (chunked, ≤700KB each)
-02-timeline-turn26-50.md # …
-```
-
-The Markdown report opens in any editor / VSCode / Typora.
-
-### 5. Cache management
-
-Overview → "Cache management": view cache sizes and clean selectively (timeline cache / all). Caches rebuild automatically on next access; session data is never affected.
+- **Overview**: sidebar "Session Flow" → all session cards. Search supports `tool:` / `file:` / `err:` prefixes; free text of ≥2 characters additionally triggers cross-session full-text search.
+- **Detail**: click a card. Turns are folded by default — click a turn header to expand; the four-tab navigation locates entries; the header offers LLM summary, ZIP export, dock right, and lineage.
+- **Native conversation page**: the "Session Flow" tab reviews the current session in place; the turn rail on the Chat tab jumps to any turn; hover the title for ✎ rename.
+- **Live**: click "Live" on a running session, auto-refresh every 3 seconds.
 
 ## Acknowledgements
 
-This plugin stands on the shoulders of the DSH community. Thanks to:
+- **[DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness)** — the runtime this plugin builds on.
+- **[@deepseek-ai/dsh-session-persistence-jsonl](https://github.com/deepseek-ai/deepseek-harness)** — the zstd multi-frame scanning algorithm (`lib/archive.js` adapted, MIT licensed).
+- **[dsh-web-ui (@linxin666 family)](https://github.com/zhu1090093659/dsh-web-ui)** — reference for the sidebar-entry / panel mounting pattern; no code copied.
+- **[dsh-webui-market-plugin](https://www.npmjs.com/package/@sanqi-normal/dsh-webui-market-plugin)** — plugin-market mechanism and distribution channel.
 
-- **[DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness)** — the DSH agent workbench and plugin ecosystem this plugin runs on.
-- **[@deepseek-ai/dsh-session-persistence-jsonl](https://github.com/deepseek-ai/deepseek-harness)** — the zstd multi-frame scanning algorithm for session archives (`scanZstdFrames` in `lib/archive.js` is adapted from this project, MIT licensed).
-- **[dsh-web-ui (@linxin666 family)](https://github.com/zhu1090093659/dsh-web-ui)** — reference for the sidebar-entry and center-panel mounting pattern (DOM-level injection + panel mutual exclusion); no code copied; includes dsh-task-board / dsh-ssh etc.
-- **[dsh-webui-market-plugin](https://www.npmjs.com/package/@sanqi-normal/dsh-webui-market-plugin)** — the plugin-market mechanism and a distribution channel for this plugin.
-
-> Copyrights belong to their respective authors; this plugin is Apache-2.0 licensed and retains original license notices for third-party code (see comments in `lib/archive.js`).
+Apache-2.0 licensed; original license notices for third-party code are retained.
 
 ## License
 

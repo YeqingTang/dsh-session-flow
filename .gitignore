@@ -6,16 +6,9 @@ node_modules/
 verify/
 !verify/.gitkeep
 
-# 本地留存文档（个人开发用，不进公开仓库）
-docs/DEVELOPER.md
-docs/AI-CONTEXT.md
-docs/RELEASE-PLAN.md
-docs/RELEASE-TODO.md
-docs/NPM-CREDENTIALS.md
+# 本地留存文档（个人开发用，不进公开仓库；docs 全目录排除）
+docs/
 
 # 导出产物
 *.zip
 .npmrc
-docs/MAINTENANCE.md
-docs/contributing.md
-docs/HANDOVER.md

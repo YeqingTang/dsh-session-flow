@@ -33,7 +33,9 @@ Restructures DSH session message streams into a **foldable information flow with
 | Dual-mode summary | Rule summary (zero cost, assembled live) + LLM summary (cached, prompts regeneration) |
 | Live tracking | 3s polling for running sessions, breathing highlight + generating indicator |
 | ZIP export | Overview + chunked timeline as a Markdown report |
-| Session rename | Custom titles as a display-layer overlay, restore anytime |
+| Session rename | Same data source as the official title (log-backed), synced both ways in real time |
+| Health monitor | Four-level classification: active / tool-running / quiet / likely stalled; overview badges + detail live bar |
+| Header health chip | Next to the mode label in the session header; a vertical bar that expands into a status card on hover, click to open detail |
 | Session Flow tab | Embedded tab on the native conversation page, cross-navigates with the workbench |
 | Turn rail | Turn jumps on the left of the Chat tab (Chat tab only) |
 | Cross-session full-text search | Content-level recall, hits jump into the Session Flow tab and locate |
@@ -56,7 +58,8 @@ Requirements: DSH Web GUI (latest stable); Node.js ≥ 22.19 (built-in zstd deco
 
 - **Overview**: sidebar "Session Flow" → all session cards. Search supports `tool:` / `file:` / `err:` prefixes; free text of ≥2 characters additionally triggers cross-session full-text search.
 - **Detail**: click a card. Turns are folded by default — click a turn header to expand; the four-tab navigation locates entries; the header offers LLM summary, ZIP export, dock right, and lineage.
-- **Native conversation page**: the "Session Flow" tab reviews the current session in place; the turn rail on the Chat tab jumps to any turn; hover the title for ✎ rename.
+- **Native conversation page**: the "Session Flow" tab reviews the current session in place; the turn rail on the Chat tab jumps to any turn; hover the title for ✎ rename (synced with the official title in real time).
+- **Health status**: the health chip right of the mode label in the header (vertical bar: green = active / amber = tool running / red = likely stalled) expands on hover; click to open the Session Flow detail. Overview cards and the live bar show the same badges.
 - **Live**: click "Live" on a running session, auto-refresh every 3 seconds.
 
 ## Acknowledgements

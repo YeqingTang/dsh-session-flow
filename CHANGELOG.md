@@ -3,6 +3,16 @@
 本插件所有显著变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.1.0] - 未发布（Unreleased）
+
+### 新增
+- **重命名对齐官方数据源**：改走官方 `session.rename` RPC（log-backed `session/title` 事件），与官方侧栏同一 store 即时同步；官方改名经 mux `session/projection` 广播**秒级同步**到会话流（免重扫）；显示优先级 档案 user 标题 > renames.json 遗留 > 自动标题
+- **会话健康监控（疑似卡死识别）**：四级分类 🟢活跃 / 🟡工具执行中 / 🟡静默中 / 🔴疑似卡死（静默 ≥3 分钟），区分「长任务正常跑」与「LLM 挂起」；总览卡片徽标（30s 探测）+ 详情实时条徽标
+- **会话页头部健康芯片**：顶栏模式标识右侧常驻（官方 `conversation.session.header.actions` 槽位），钢琴键语言——收拢为竖向彩色胶囊条（绿/黄/红语义色，卡死呼吸脉冲），悬浮展开为毛玻璃状态卡，点击直达会话流详情
+
+### 说明
+- 官方 rename 拒绝的场景（清空标题、子代理会话 agent-busy）回退本地 renames.json 覆盖层（自然淘汰，不再迁移）
+
 ## [1.0.0] - 2026-08-16
 
 ### 新增

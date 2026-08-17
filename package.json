@@ -1,7 +1,7 @@
 {
   "name": "dsh-session-flow",
-  "description": "DSH 会话回顾与归档插件：可折叠信息流 + 会话级汇总——总览工作台、折叠时间线、血缘树、双模式摘要、全文检索、ZIP 导出、实时跟踪、会话重命名",
-  "version": "1.0.0",
+  "description": "DSH 会话回顾与归档插件：可折叠信息流 + 会话级汇总——总览工作台、折叠时间线、血缘树、双模式摘要、全文检索、ZIP 导出、实时跟踪、会话重命名（官方数据源对齐）、健康监控",
+  "version": "1.1.0",
   "type": "module",
   "main": "lib/host.js",
   "exports": {

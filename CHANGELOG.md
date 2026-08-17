@@ -3,7 +3,7 @@
 本插件所有显著变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [1.1.0] - 未发布（Unreleased）
+## [1.1.0] - 2026-08-17
 
 ### 新增
 - **重命名对齐官方数据源**：改走官方 `session.rename` RPC（log-backed `session/title` 事件），与官方侧栏同一 store 即时同步；官方改名经 mux `session/projection` 广播**秒级同步**到会话流（免重扫）；显示优先级 档案 user 标题 > renames.json 遗留 > 自动标题

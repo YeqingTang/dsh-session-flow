@@ -3,6 +3,11 @@
 本插件所有显著变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 变更
+- 移除「详情右栏 × 多右栏面板共存」场景下的拖拽把手位置内置补偿：该补偿已由上游 aionui-panel ≥ 0.2.0 接管（dsh-web-ui PR #311）；与右侧扩展面板共存使用时请保持 aionui-panel 为 0.2.0 及以上版本
+
 ## [1.1.0] - 2026-08-17
 
 ### 新增

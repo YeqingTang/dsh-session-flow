@@ -3,7 +3,7 @@
 本插件所有显著变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [1.2.0] - 2026-08-20
 
 ### 新增
 - **插件设置页**：设置弹窗新增「会话流」独立分节（左导航顶级 tab）——轮次悬浮条可见行数/滚轮灵敏度/静止吸附延迟、实时轮询间隔/吸底阈值/保留历史回合数、疑似卡死判定阈值共 7 项参数可配置，保存即时生效；未配置时行为与此前版本完全一致
@@ -91,3 +91,5 @@
 
 [0.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v0.1.0
 [1.0.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.0.0
+[1.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.1.0
+[1.2.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.2.0

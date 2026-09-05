@@ -3,7 +3,27 @@
 本插件所有显著变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [1.2.0] - 2026-08-20
+## [1.3.0] - 2026-09-05
+
+适配 dsh v0.1.2（官方会话流重构进 dsh-client-ui-chat，新增官方轮次导航 TurnNavigatorRail）。
+
+### 新增
+- **官方轮次导航增强层**：dsh v0.1.2 起官方会话页右侧自带轮次导航刻度条（覆盖完整历史、可跳转未载入轮次）。本插件在其上叠加独有增量（DOM 观察 + 自愈重挂，不拦截官方交互）：
+  - hover 刻度追加「本轮结论摘要 + 工具统计」悬浮卡（官方预览只有 prompt/response 片段）
+  - 有工具错误的轮次在刻度左侧叠红色角标
+  - 右键导航条唤起会话流工作台
+- **设置页新增「轮次导航」组（2 项布尔开关）**：「官方轮次导航增强」（默认开）与「经典左侧悬浮条」（默认关，可复活插件自带的钢琴键悬浮条与官方导航并存）
+- **旧版 dsh 自动回退**：检测不到官方导航条（dsh < v0.1.2 或非对话标签页）时自动回退经典悬浮条，老用户功能不丢
+
+### 修复（v0.1.2 兼容性）
+- **中栏全页工作台挂载**：官方 v0.1.2 重构后会话面板选择器兜底改为 `[data-pane="conversation"], [class*=centerCol]`（与 dsh-web-all 全家桶新版同款约定；data-pane 打标本就来自全家桶运行时，非官方 dsh——纯净官方环境此前挂不上，现在也能工作了）
+- **轮次悬浮条行锚点**：官方移除 `data-time-hover-root`，改锚 `[data-chat-flow] [data-chat-flow-kind="user"]`（官方内部查行同款选择器），旧锚点保留作旧版 dsh 回退
+- **标题秒级同步**：官方移除 `conn.api.events.mux` 消费面，改用 `sessions.list` 订阅读取 `byId[].title`（官方 rename 后标题 projection 即时落到列表行，同样秒级）；mux 路径保留作旧版 dsh 回退
+
+### 变更
+- 默认轮次导航体验切换为「官方 rail + 增强层」（方案 A：用户拍板 2026-09-05）；原钢琴键悬浮条完整保留，设置页一键复活
+
+
 
 ### 新增
 - **插件设置页**：设置弹窗新增「会话流」独立分节（左导航顶级 tab）——轮次悬浮条可见行数/滚轮灵敏度/静止吸附延迟、实时轮询间隔/吸底阈值/保留历史回合数、疑似卡死判定阈值共 7 项参数可配置，保存即时生效；未配置时行为与此前版本完全一致
@@ -93,3 +113,4 @@
 [1.0.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.0.0
 [1.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.1.0
 [1.2.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.2.0
+[1.3.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.3.0

@@ -17,6 +17,7 @@
 - **旧版 dsh 自动回退**：检测不到官方导航条（dsh < v0.1.2 或非对话标签页）时经典悬浮条照常工作，老用户功能不丢
 
 ### 修复（v0.1.2 兼容性）
+- **头部健康胶囊 + 全部实时通道恢复**：官方 `sessions.history` 返回形状从 `{events}` 改为 `{records, hasMore}`（事件包 `{type:'event',event}` / chunk 合成行）——旧 `Array.isArray(val.events)` 守卫静默失效，导致标题旁状态胶囊恒隐、详情页实时模式 / dock 实时 / 子代理实时全挂。新增 `historyEventsOf` 统一解析（新旧形状兼容 + 丢弃 chunkrow 合成行），六处消费点全部修复
 - **中栏全页工作台挂载**：官方 v0.1.2 重构后会话面板选择器兜底改为 `[data-pane="conversation"], [class*=centerCol]`（与 dsh-web-all 全家桶新版同款约定；data-pane 打标本就来自全家桶运行时，非官方 dsh——纯净官方环境此前挂不上，现在也能工作了）
 - **轮次悬浮条行锚点**：官方移除 `data-time-hover-root`，改锚 `[data-chat-flow] [data-chat-flow-kind="user"]`（官方内部查行同款选择器），旧锚点保留作旧版 dsh 回退
 - **标题秒级同步**：官方移除 `conn.api.events.mux` 消费面，改用 `sessions.list` 订阅读取 `byId[].title`（官方 rename 后标题 projection 即时落到列表行，同样秒级）；mux 路径保留作旧版 dsh 回退

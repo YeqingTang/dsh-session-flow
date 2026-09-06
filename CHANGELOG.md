@@ -3,6 +3,11 @@
 本插件所有显著变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 新增
+- **存档占用分析**：总览统计条新增「存储」chip——当前范围（所选工作区）会话存档总占用，只读统计不改任何数据；排序下拉新增「占用最大」，快速定位最占空间的会话
+
 ## [1.3.0] - 2026-09-05
 
 适配 dsh v0.1.2（官方会话流重构进 dsh-client-ui-chat，新增官方轮次导航 TurnNavigatorRail）。
@@ -27,6 +32,8 @@
 - **状态胶囊常驻化**：空闲会话也展示——灰条「空闲 · N 分钟前」（计时基准 = 最后一条事件 time，即会话结束时刻；切入空闲时轻量拉一次最近事件，30s tick 保鲜；列表投影 updatedAt 语义是「投影上次变化」非「会话结束」，实测裁定弃用）；运行时保持活跃（绿）/ 工具执行中·静默中（黄）/ 疑似卡死（红脉冲）；probe 未返回前乐观显示活跃防闪烁；空白新会话不显示
 
 
+
+## [1.2.0] - 2026-08-20
 
 ### 新增
 - **插件设置页**：设置弹窗新增「会话流」独立分节（左导航顶级 tab）——轮次悬浮条可见行数/滚轮灵敏度/静止吸附延迟、实时轮询间隔/吸底阈值/保留历史回合数、疑似卡死判定阈值共 7 项参数可配置，保存即时生效；未配置时行为与此前版本完全一致
@@ -112,6 +119,7 @@
 **其他**
 - 缓存管理面板（索引 + 时间线分类清理，仅限插件私有目录）
 
+[Unreleased]: https://github.com/YeqingTang/dsh-session-flow/compare/v1.3.0...HEAD
 [0.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v0.1.0
 [1.0.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.0.0
 [1.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.1.0

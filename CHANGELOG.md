@@ -17,13 +17,14 @@
 - **旧版 dsh 自动回退**：检测不到官方导航条（dsh < v0.1.2 或非对话标签页）时经典悬浮条照常工作，老用户功能不丢
 
 ### 修复（v0.1.2 兼容性）
-- **头部健康胶囊 + 全部实时通道恢复**：官方 `sessions.history` 在 v0.1.2 双双变更——返回值 `{events}` 改为 `{records, hasMore}`（事件包 `{type:'event',event}` / chunk 合成行），**信封从 `{result:{ok,value}}` 改为顶层 `{ok,value}`**——旧读取两层全空、静默失效，导致标题旁状态胶囊恒隐、详情页实时模式 / dock 实时 / 子代理实时全挂。新增 `historyValueOf`（双信封）+ `historyEventsOf`（双形状 + 丢弃 chunkrow 合成行）统一解析，六处消费点全部修复；芯片 sessionId 另加 `sessions.list.current` 槽位兜底
+- **头部健康胶囊 + 全部实时通道恢复**：官方 `sessions.history` 在 v0.1.2 **三重变更**——返回值 `{events}` 改为 `{records, hasMore}`（事件包 `{type:'event',event}` / chunk 合成行）、信封从 `{result:{ok,value}}` 改为**顶层 `{ok,value}`**、session RPC 整体迁入新 **`remote.session` 服务面**（`history` 改名 `page`、`throughSeq` 必填且宿主硬校验 ≤ 日志 cursor，需先经 `list` 投影 `asOfSeq` 解析）——旧读取全部静默失效，导致标题旁状态胶囊恒隐、详情页实时模式 / dock 实时 / 子代理实时 / 总览卡死监控 / 官方重命名全挂。新增 `sfBuildRemote` 双面适配器（新面优先、旧面回退保 v0.1.1）统一换线八类消费点；芯片 sessionId 另加 `sessions.list.current` 槽位兜底
 - **中栏全页工作台挂载**：官方 v0.1.2 重构后会话面板选择器兜底改为 `[data-pane="conversation"], [class*=centerCol]`（与 dsh-web-all 全家桶新版同款约定；data-pane 打标本就来自全家桶运行时，非官方 dsh——纯净官方环境此前挂不上，现在也能工作了）
 - **轮次悬浮条行锚点**：官方移除 `data-time-hover-root`，改锚 `[data-chat-flow] [data-chat-flow-kind="user"]`（官方内部查行同款选择器），旧锚点保留作旧版 dsh 回退
 - **标题秒级同步**：官方移除 `conn.api.events.mux` 消费面，改用 `sessions.list` 订阅读取 `byId[].title`（官方 rename 后标题 projection 即时落到列表行，同样秒级）；mux 路径保留作旧版 dsh 回退
 
 ### 变更
 - 轮次导航默认体验 = 我们的经典悬浮条（左）+ 官方 rail + 增强层（右）并存（方案 A 融合，用户拍板 2026-09-05）；两者均可在设置页单独关闭
+- **状态胶囊常驻化**：空闲会话也展示——灰条「空闲 · N 分钟前」（零 RPC，取自列表快照 updatedAt，30s 保鲜 tick）；运行时保持活跃（绿）/ 工具执行中·静默中（黄）/ 疑似卡死（红脉冲）；probe 未返回前乐观显示活跃防闪烁；空白新会话不显示
 
 
 

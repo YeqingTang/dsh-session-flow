@@ -1,0 +1,4093 @@
+// lib/client.js — dsh-session-flow 浏览器半。
+//
+// 挂载两个 DOM 面：
+//  1) 侧边栏入口行（「会话流」按钮，DOM 级注入 + MutationObserver 自愈，
+//     模式参照 dsh-client-ui-task-board 的 sidebar-entry）；
+//  2) 中栏全页视图（容器追加进 [data-pane="conversation"]，
+//     <html data-dsh-session-flow-active> 切换可见性，React root 渲染）。
+//
+// 视图：M2 会话总览页 + M3 折叠时间线详情页（回合/步骤/工具链折叠、产物内联、锚点定位）。
+// 跨插件激活协调：与 taskboard / ssh 面板互斥（dsh-panel-activate 事件 + 移除对方 html 属性）。
+// 失败策略：挂载问题只记日志，绝不让 GUI 启动失败。
+// ── 客户端源码模块化：纯数据块拆至 ./strings.js 与 ./styles.js（上方 import，构建时内联）──
+import { VIEW_SELECTOR, ACTIVE_ATTR } from './shared.js'
+import { STR } from './strings.js'
+import { SETTINGS_STYLE, NAV_ICON_USER, NAV_ICON_TOOL, NAV_ICON_ERR, NAV_ICON_SEARCH, STYLE } from './styles.js'
+
+window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
+  var module = { exports: {} }; var exports = module.exports;
+
+  const React = require('react')
+  const { useState, useEffect, useMemo, useRef, useSyncExternalStore } = React
+  const h = React.createElement
+  const { createRoot } = require('react-dom/client')
+
+  // ── 常量 ────────────────────────────────────────────────────────────
+  const ENTRY_SELECTOR = '[data-dsh-session-flow-entry]'
+  const OTHER_ACTIVE_ATTRS = ['data-dsh-taskboard-active', 'data-dsh-ssh-active']
+  const ACTIVATE_EVENT = 'dsh-panel-activate'
+  const PANEL_NAME = 'sessionflow'
+  // 会话面板容器选择器：dsh v0.1.2 起官方移除 data-pane="conversation"（会话流
+  // 重构进 dsh-client-ui-chat），兜底命中布局中栏（CenterColumn，类名含 centerCol
+  // 哈希后缀稳定片段）。工作台/标签切换/钢琴键定位共用此锚。
+  const CONVERSATION_SELECTOR = '[data-pane="conversation"], [class*=centerCol]'
+  const SIDEBAR_ROW_SELECTOR = '[class*="sessionRow"], [class*="projectRow"], [class*="searchResultRow"], [class*="searchResultWorkspace"], [class*="newSession"]'
+  const ACTIVE_WINDOW_MS = 15 * 60 * 1000 // 最近 15 分钟有事件 → 视为进行中（归档/总览徽标用）
+
+
+  // ── 插件设置（settings.section 独立 tab）──────────────────────────
+  // Host 注册 settings 命名空间 'session-flow'（lib/host.js SETTINGS_DEFAULTS 同源）；
+  // client 经 settingsScope 读写（pet 同款：优先 webUiSettings 桥，回退 ctx.settingsScope）。
+  // 全部消费点读 sfSettings.current.xxx，缺省 = 原硬编码值——无设置时行为零变化。
+  const SETTINGS_DEFAULTS = { pianoWindow: 12, pianoWheelSpeed: 0.012, pianoSnapMs: 170, livePollMs: 3000, liveFollowPx: 40, liveHistoryTurns: 3, stallThresholdMin: 3, railEnhance: true, railHideOfficial: false, pianoClassicStrip: true }
+  const sfSettings = { current: { ...SETTINGS_DEFAULTS } }
+  const SETTING_GROUPS = [
+    { titleKey: 'setGroupPiano', fields: ['pianoWindow', 'pianoWheelSpeed', 'pianoSnapMs'] },
+    { titleKey: 'setGroupLive', fields: ['livePollMs', 'liveFollowPx', 'liveHistoryTurns'] },
+    { titleKey: 'setGroupHealth', fields: ['stallThresholdMin'] },
+    { titleKey: 'setGroupNav', fields: ['railEnhance', 'railHideOfficial', 'pianoClassicStrip'] },
+  ]
+  const SETTING_FIELD_SPECS = {
+    pianoWindow: { min: 6, max: 18, integer: true, labelKey: 'setPianoWindow', hintKey: 'setPianoWindowHint' },
+    pianoWheelSpeed: { min: 0.005, max: 0.03, integer: false, labelKey: 'setPianoWheelSpeed', hintKey: 'setPianoWheelSpeedHint' },
+    pianoSnapMs: { min: 100, max: 400, integer: true, labelKey: 'setPianoSnapMs', hintKey: 'setPianoSnapMsHint' },
+    livePollMs: { min: 1500, max: 10000, integer: true, labelKey: 'setLivePollMs', hintKey: 'setLivePollMsHint' },
+    liveFollowPx: { min: 20, max: 120, integer: true, labelKey: 'setLiveFollowPx', hintKey: 'setLiveFollowPxHint' },
+    liveHistoryTurns: { min: 0, max: 10, integer: true, labelKey: 'setLiveHistoryTurns', hintKey: 'setLiveHistoryTurnsHint' },
+    stallThresholdMin: { min: 1, max: 10, integer: true, labelKey: 'setStallThresholdMin', hintKey: 'setStallThresholdMinHint' },
+    railEnhance: { kind: 'bool', labelKey: 'setRailEnhance', hintKey: 'setRailEnhanceHint' },
+    pianoClassicStrip: { kind: 'bool', labelKey: 'setPianoClassic', hintKey: 'setPianoClassicHint' },
+    railHideOfficial: { kind: 'bool', labelKey: 'setRailHide', hintKey: 'setRailHideHint' },
+  }
+  function formatSettingValue(v) { return v === undefined || v === null ? '' : String(v) }
+  function parseSettingValue(spec, text) {
+    if (spec.kind === 'bool') {
+      const t = String(text).trim()
+      return t === 'true' ? true : t === 'false' ? false : undefined
+    }
+    const n = Number(String(text).trim())
+    if (!Number.isFinite(n) || n < spec.min || n > spec.max) return undefined
+    if (spec.integer && !Number.isInteger(n)) return undefined
+    return n
+  }
+
+  // 设置表单控制器：草稿（staged edits）+ scope 读写（pet CardForm 简化版——
+  // 同样是「保存才落盘」语义；getSnapshot 缓存快照供 useSyncExternalStore）。
+  class SfSettingsController {
+    constructor(scope) {
+      this.scope = scope
+      this.listeners = new Set()
+      this.draft = new Map() // key -> { text, clear }
+      this.saving = false
+      this.failed = false
+      this.cached = null
+      this.unsubscribe = scope.subscribe(() => this.notify())
+      this.notify()
+    }
+    dispose() {
+      try { if (this.unsubscribe) this.unsubscribe() } catch (e) {}
+      this.unsubscribe = null
+      this.listeners.clear()
+    }
+    subscribe(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn) }
+    // 快照值合并进模块级桥（所有功能代码的消费点；settings 变化即时下发）。
+    applySnapshotToBridge() {
+      try {
+        const snap = this.scope.getSnapshot()
+        if (snap && snap.status === 'ready' && snap.value && typeof snap.value === 'object') {
+          sfSettings.current = { ...SETTINGS_DEFAULTS, ...snap.value }
+        }
+      } catch (e) {}
+    }
+    notify() {
+      this.applySnapshotToBridge()
+      this.cached = this.buildSnapshot()
+      for (const fn of this.listeners) fn()
+    }
+    getSnapshot() {
+      if (this.cached === null) this.cached = this.buildSnapshot()
+      return this.cached
+    }
+    buildSnapshot() {
+      let snap = null
+      try { snap = this.scope.getSnapshot() } catch (e) {}
+      const status = snap ? String(snap.status || 'unavailable') : 'unavailable'
+      const value = { ...SETTINGS_DEFAULTS, ...(snap && snap.value ? snap.value : {}) }
+      const user = (snap && snap.user && typeof snap.user === 'object') ? snap.user : {}
+      const fields = {}
+      for (const key of Object.keys(SETTING_FIELD_SPECS)) {
+        const spec = SETTING_FIELD_SPECS[key]
+        const staged = this.draft.get(key)
+        const stored = Object.prototype.hasOwnProperty.call(user, key)
+        if (staged === undefined) {
+          fields[key] = { text: formatSettingValue(value[key]), overridden: stored, invalid: false, clear: false }
+        } else {
+          fields[key] = { text: staged.text, overridden: !staged.clear, invalid: !staged.clear && parseSettingValue(spec, staged.text) === undefined, clear: staged.clear }
+        }
+      }
+      return {
+        status,
+        writable: snap ? snap.writable !== false : false,
+        fields,
+        dirty: this.draft.size > 0,
+        invalid: Object.keys(fields).some((k) => fields[k].invalid),
+        saving: this.saving,
+        failed: this.failed,
+      }
+    }
+    edit(key, text) { this.draft.set(key, { text, clear: false }); this.failed = false; this.notify() }
+    resetField(key) {
+      // 恢复默认 = 清除 user 层覆盖（草稿显示 base 值，保存时 unset）。
+      let baseText = formatSettingValue(SETTINGS_DEFAULTS[key])
+      try {
+        const snap = this.scope.getSnapshot()
+        if (snap && snap.base && snap.base[key] !== undefined) baseText = formatSettingValue(snap.base[key])
+      } catch (e) {}
+      this.draft.set(key, { text: baseText, clear: true })
+      this.failed = false
+      this.notify()
+    }
+    discard() { this.draft.clear(); this.failed = false; this.notify() }
+    async save() {
+      const snap = this.getSnapshot()
+      if (this.draft.size === 0 || this.saving || snap.invalid) return
+      const pending = new Map(this.draft)
+      this.saving = true
+      this.failed = false
+      this.notify()
+      const landed = new Set()
+      for (const [key, staged] of pending) {
+        try {
+          if (staged.clear) { await this.scope.unset(key); landed.add(key); continue }
+          const v = parseSettingValue(SETTING_FIELD_SPECS[key], staged.text)
+          if (v === undefined) continue
+          await this.scope.set(key, v)
+          landed.add(key)
+        } catch (e) {}
+      }
+      for (const [key, before] of pending) if (landed.has(key) && this.draft.get(key) === before) this.draft.delete(key)
+      this.saving = false
+      this.failed = landed.size !== pending.size
+      this.notify()
+    }
+  }
+
+  // 设置弹窗「会话流」分节：分组表单（左标签+说明，右数字输入），底部保存/放弃。
+  function SessionFlowSettingsSection(props) {
+    const controller = props.controller
+    const state = useSyncExternalStore((fn) => controller.subscribe(fn), () => controller.getSnapshot())
+    if (state.status !== 'ready') {
+      return h('div', { className: 'sfset-root' }, h('p', { className: 'sfset-unavailable' }, STR.setUnavailable))
+    }
+    const disabled = !state.writable || state.saving
+    const rows = []
+    for (const group of SETTING_GROUPS) {
+      rows.push(h('div', { key: group.titleKey, className: 'sfset-groupTitle' }, STR[group.titleKey]))
+      for (const key of group.fields) {
+        const spec = SETTING_FIELD_SPECS[key]
+        const field = state.fields[key]
+        rows.push(h('div', { key, className: 'sfset-row' + (field.invalid ? ' sfset-invalid' : '') },
+          h('div', { className: 'sfset-meta' },
+            h('div', { className: 'sfset-label' }, STR[spec.labelKey],
+              field.overridden ? h('span', { className: 'sfset-overridden' }, STR.setOverridden) : null),
+            h('div', { className: 'sfset-hint' }, STR[spec.hintKey])),
+          h('div', { className: 'sfset-controls' },
+            spec.kind === 'bool'
+              ? h('input', {
+                  className: 'sfset-check', type: 'checkbox',
+                  checked: field.text === 'true', disabled,
+                  onChange: (e) => controller.edit(key, String(e.target.checked)),
+                })
+              : h('input', {
+                  className: 'sfset-input', type: 'number',
+                  min: spec.min, max: spec.max, step: spec.integer ? 1 : 0.001,
+                  value: field.text, disabled,
+                  onChange: (e) => controller.edit(key, e.target.value),
+                }),
+            h('button', { type: 'button', className: 'sfset-reset', disabled, onClick: () => controller.resetField(key) }, STR.setReset))))
+      }
+    }
+    return h('div', { className: 'sfset-root' },
+      h('p', { className: 'sfset-desc' }, STR.settingsDesc),
+      rows,
+      h('div', { className: 'sfset-footer' },
+        h('button', { type: 'button', className: 'sfset-save', disabled: disabled || !state.dirty || state.invalid, onClick: () => { controller.save() } }, STR.setSave),
+        h('button', { type: 'button', className: 'sfset-discard', disabled: disabled || !state.dirty, onClick: () => controller.discard() }, STR.setDiscard),
+        state.invalid ? h('span', { className: 'sfset-error' }, STR.setInvalid) : null,
+        state.failed ? h('span', { className: 'sfset-error' }, STR.setSaveFail) : null))
+  }
+
+  // 取色对齐宠物设置卡（同一弹窗内经真机明暗/皮肤验证）：纯 dsw-alias 变量、
+  // 不写 hex 兜底——变量缺失时继承弹窗上下文色，硬编码兜底在皮肤主题下反而会撞色。
+
+  // ── API ─────────────────────────────────────────────────────────────
+  function api(method, params, signal) {
+    return fetch('/api/session-flow', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(Object.assign({ method }, params || {})),
+      signal,
+    }).then((r) => r.json())
+  }
+
+  // ── 迷你 Markdown 渲染（LLM 摘要用）────────────────────────────────
+  // 摘要里的 **加粗** / *斜体* / `行内代码` / 列表 / 标题若按纯文本渲染会
+  // 原样显示星号；这里做最小解析成 React 元素（不引入 marked 依赖）。
+  // 输出为元素数组；无任何匹配时返回 null 由调用方按纯文本兜底。
+  function renderSummaryMd(text) {
+    const src = String(text || '')
+    if (!src) return null
+    const out = []
+    const lines = src.split(/\r?\n/)
+    let i = 0
+    let listBuf = null // { ordered, items: [] }
+    const flushList = () => {
+      if (listBuf) {
+        out.push(h(listBuf.ordered ? 'ol' : 'ul', { style: { margin: '2px 0 2px 18px', padding: 0 } },
+          listBuf.items.map((it, k) => h('li', { key: k, style: { margin: '1px 0' } }, it))))
+        listBuf = null
+      }
+    }
+    while (i < lines.length) {
+      const line = lines[i]
+      const trimmed = line.trim()
+      // 空行：结束当前段落/列表。
+      if (!trimmed) { flushList(); i++; continue }
+      // 列表项：- / * / 1. 开头（宽松匹配）。
+      const liMatch = trimmed.match(/^([-*]|\d+[.)])\s+(.*)$/)
+      if (liMatch) {
+        if (!listBuf || listBuf.ordered !== /^\d/.test(liMatch[1])) {
+          flushList()
+          listBuf = { ordered: /^\d/.test(liMatch[1]), items: [] }
+        }
+        listBuf.items.push(inlineMd(liMatch[2]))
+        i++
+        continue
+      }
+      flushList()
+      // 标题：## / ### 开头。
+      const hd = trimmed.match(/^(#{1,4})\s+(.*)$/)
+      if (hd) {
+        out.push(h('div', { style: { fontWeight: 700, margin: '3px 0 1px' } }, inlineMd(hd[2])))
+        i++
+        continue
+      }
+      // 普通段落行（连续非空行合并为一段）。
+      const para = []
+      while (i < lines.length && lines[i].trim()) { para.push(lines[i]); i++ }
+      out.push(h('div', { style: { margin: '1px 0' } }, inlineMd(para.join('\n'))))
+    }
+    flushList()
+    return out.length > 0 ? out : null
+  }
+  // 行内样式：**加粗**、*斜体*、`行内代码`；按 token 切分后逐段转元素。
+  function inlineMd(str) {
+    const tokens = String(str).split(/(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g).filter((t) => t !== '')
+    if (tokens.length <= 1) return str
+    return tokens.map((t, k) => {
+      if (/^\*\*[^*]+\*\*$/.test(t)) return h('strong', { key: k }, t.slice(2, -2))
+      if (/^\*[^*]+\*$/.test(t)) return h('em', { key: k }, t.slice(1, -1))
+      if (/^`[^`]+`$/.test(t)) return h('code', { key: k, style: { fontFamily: 'monospace', background: 'rgba(127,127,127,.15)', borderRadius: 3, padding: '0 3px' } }, t.slice(1, -1))
+      return t
+    })
+  }
+
+  // ── 格式化工具 ──────────────────────────────────────────────────────
+  function fmtTime(ms) {
+    if (ms === null || ms === undefined) return '—'
+    const d = new Date(ms)
+    const pad = (n) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  }
+
+  function fmtDuration(ms) {
+    if (ms === null || ms === undefined) return '—'
+    const s = Math.max(0, Math.floor(ms / 1000))
+    if (s < 60) return s + 's'
+    const m = Math.floor(s / 60)
+    if (m < 60) return m + 'm ' + (s % 60) + 's'
+    const hh = Math.floor(m / 60)
+    return hh + 'h ' + (m % 60) + 'm'
+  }
+
+  function fmtSize(bytes) {
+    if (bytes === null || bytes === undefined) return '—'
+    if (bytes < 1024) return bytes + ' B'
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KiB'
+    return (bytes / 1024 / 1024).toFixed(1) + ' MiB'
+  }
+
+  // ── M8a 会话重命名：行内编辑（总览卡片 / 详情页标题复用）─────────────
+  // props: { initial, onSave: (title) => Promise, onCancel, placeholder }
+  // 保存成功（ok truthy / 无返回）由父组件退出编辑态；失败（reject / ok===false）留在编辑态显示错误。
+  function RenameInline(props) {
+    const [value, setValue] = useState(props.initial || '')
+    const [saving, setSaving] = useState(false)
+    const [err, setErr] = useState('')
+    const inputRef = useRef(null)
+    useEffect(() => {
+      const el = inputRef.current
+      if (el) { el.focus(); el.select() }
+    }, [])
+    const commit = () => {
+      if (saving) return
+      const v = value.trim()
+      if (v === String(props.initial || '').trim()) { props.onCancel(); return }
+      setSaving(true)
+      setErr('')
+      Promise.resolve(props.onSave(v)).then((ok) => {
+        if (ok === false) setSaving(false)
+      }).catch((e) => {
+        setSaving(false)
+        setErr(String(e && e.message || e))
+      })
+    }
+    return h('span', { className: 'sf-renameWrap' },
+      h('input', {
+        ref: inputRef,
+        className: 'sf-renameInput',
+        value,
+        placeholder: props.placeholder || STR.renamePlaceholder,
+        disabled: saving,
+        onInput: (e) => setValue(e.target.value),
+        onKeyDown: (e) => {
+          if (e.key === 'Enter') commit()
+          else if (e.key === 'Escape') { e.stopPropagation(); props.onCancel() }
+        },
+        onBlur: commit,
+        onClick: (e) => e.stopPropagation(),
+      }),
+      err && h('span', { className: 'sf-renameErr' }, err),
+    )
+  }
+
+  // ── 重命名对齐官方 + 卡死监控 共享辅助 ─────────────────────────────
+  /** 官方 rename RPC（log-backed session/title user 事件）：本插件与官方侧栏同一数据源。 */
+  const renameViaOfficial = (conn, sessionId, title) => {
+    return conn.api.sessions.rename({ sessionId, title }).then((resp) => {
+      const res = resp && resp.result
+      if (res && res.ok === true && res.value && typeof res.value.title === 'string') return res.value.title
+      throw new Error((res && res.error && res.error.message) || STR.renameFail)
+    })
+  }
+  const canOfficialRename = (conn) =>
+    conn !== undefined && conn.api !== undefined && conn.api.sessions !== undefined && typeof conn.api.sessions.rename === 'function'
+  // ── v0.1.2 兼容（三）：session RPC 双面适配器 ─────────────────────
+  // 新面：ctx.remote.session.*（inject 需声明 remote/remote.session，否则代理抛
+  // 「cannot get property remote.session without inject」）；信封顶层 {ok,value}；
+  // history 改名 page({address, maxMessages,...}) → {records, hasMore}；rename/list
+  // 仍在。旧面：connection.api.sessions.*（{result:{ok,value}}；subagents.history）。
+  // apply 时探测（ctx.get('remote') 旧宿主抛错 → 回退旧面）。
+  const sfRemoteRef = { current: null }
+  const sfBuildRemote = (ctx, connection) => {
+    try {
+      const remote = ctx && typeof ctx.get === 'function' ? ctx.get('remote') : null
+      const sess = remote && remote.session
+      if (sess && typeof sess.page === 'function') {
+        // 宿主硬校验：throughSeq > 日志 cursor 直接 gateway/bad-request——不存在
+        // 「取最新」的大数哨兵。cursor 来源 = list items[].projections.asOfSeq
+        //（投影截至 seq，恒 ≤ 真实日志 cursor，安全）。2s TTL 缓存防探测并发打爆 list。
+        let listCache = null
+        const cursorOf = async (sessionId) => {
+          const now = Date.now()
+          if (listCache === null || now - listCache.at > 2000) {
+            const r = await sess.list({})
+            listCache = { at: now, items: r && r.ok && r.value && Array.isArray(r.value.items) ? r.value.items : [] }
+          }
+          const it = listCache.items.find((x) => x.sessionId === sessionId)
+          return it && it.projections && typeof it.projections.asOfSeq === 'number' ? it.projections.asOfSeq : -1
+        }
+        return {
+          kind: 'remote',
+          async pageBySession(sessionId, maxMessages) {
+            const throughSeq = await cursorOf(sessionId)
+            if (throughSeq < 0) return undefined
+            const r = await sess.page({ address: { kind: 'session', sessionId }, throughSeq, maxMessages })
+            return r && r.ok ? r.value : undefined
+          },
+          async pageBySub(parentSessionId, childSessionId, mode, maxMessages) {
+            const throughSeq = await cursorOf(childSessionId)
+            if (throughSeq < 0) return undefined
+            const r = await sess.page({ address: { kind: 'subagent', parentSessionId, childSessionId, mode }, throughSeq, maxMessages })
+            return r && r.ok ? r.value : undefined
+          },
+          async listSessions() { if (typeof sess.list !== 'function') return undefined; const r = await sess.list({}); return r && r.ok ? r.value : undefined },
+          canRename: typeof sess.rename === 'function',
+          async rename(sessionId, title) { const r = await sess.rename({ sessionId, title }); return r && r.ok && r.value && typeof r.value.title === 'string' ? r.value.title : undefined },
+        }
+      }
+    } catch (e) {}
+    if (connection && connection.api && connection.api.sessions && typeof connection.api.sessions.history === 'function') {
+      const envVal = (r) => (r && r.result && r.result.ok ? r.result.value : (r && r.ok ? r.value : undefined))
+      return {
+        kind: 'legacy',
+        async pageBySession(sessionId, maxMessages) { return envVal(await connection.api.sessions.history({ sessionId, maxMessages })) },
+        async pageBySub(parentSessionId, childSessionId, mode, maxMessages) { return envVal(await connection.api.subagents.history({ parentSessionId, childSessionId, mode, maxMessages })) },
+        async listSessions() { return envVal(await connection.api.sessions.list({})) },
+        canRename: canOfficialRename(connection),
+        async rename(sessionId, title) { const t = await renameViaOfficial(connection, sessionId, title).catch(() => undefined); return t },
+      }
+    }
+    return null
+  }
+  // v0.1.2 兼容（一）：sessions.history 返回值从 {events} 改为 {records, hasMore}
+  //（记录 = {type:'event', event} 或 chunk 行 {type:'chunks', event:{type:'chunkrow/…'}}）。
+  // 旧版 {events} 每项亦可能包 {event}。统一解析为事件数组；丢弃 chunkrow 合成
+  // 事件（derive 只认真实事件类型，混入会污染分类）。全部 6 个消费点共用。
+  const historyEventsOf = (val) => {
+    if (!val) return []
+    const list = Array.isArray(val.events) ? val.events : (Array.isArray(val.records) ? val.records : [])
+    const out = []
+    for (const r of list) {
+      const e = (r && r.event) || r
+      if (!e || typeof e.type !== 'string' || e.type.startsWith('chunkrow/')) continue
+      out.push(e)
+    }
+    return out
+  }
+  /** 静默时长文本（{N} 占位）。 */
+  const fmtSilent = (idleMs) => {
+    if (idleMs === null || idleMs === undefined) return ''
+    const min = Math.floor(idleMs / 60000)
+    return min >= 1
+      ? STR.healthSilentMin.replace('{N}', String(min))
+      : STR.healthSilentSec.replace('{N}', String(Math.max(1, Math.round(idleMs / 1000))))
+  }
+  /** 相对时间文本（空闲胶囊「N 分钟前」；分钟粒度足够，不追秒级新鲜度）。 */
+  const fmtAgo = (ms) => {
+    if (!ms || ms < 0) return ''
+    const min = Math.floor(ms / 60000)
+    if (min < 1) return STR.agoJustNow
+    if (min < 60) return STR.agoMin.replace('{N}', String(min))
+    const h = Math.floor(min / 60)
+    if (h < 24) return STR.agoHour.replace('{N}', String(h))
+    return STR.agoDay.replace('{N}', String(Math.floor(h / 24)))
+  }
+  /** 健康徽标（详情实时条 / 总览卡片共用）；active/ended/unknown 不渲染（已有进行中/已结束徽标）。 */
+  const healthBadge = (health) => {
+    if (!health) return null
+    const silent = fmtSilent(health.idleMs)
+    if (health.kind === 'stalled') return h('span', { className: 'sf-badge sf-badgeStall' }, '🔴 ' + STR.healthStalled + (silent ? ' · ' + silent : ''))
+    if (health.kind === 'tool-wait') return h('span', { className: 'sf-badge sf-badgeWait' }, '🟡 ' + STR.healthToolWait + (silent ? ' · ' + silent : ''))
+    if (health.kind === 'quiet') return h('span', { className: 'sf-badge sf-badgeWait' }, '🟡 ' + STR.healthQuiet + (silent ? ' · ' + silent : ''))
+    return null
+  }
+
+  // ── 会话页头部健康胶囊（官方 conversation.session.header.actions 槽位）──
+  // 位置：官方模式标识（agent-preset label, order -10）右侧（order -9）。
+  // 常驻四态（用户需求 2026-09-05：非运行也展示）：
+  //   空闲（灰条 +「N 分钟前」相对时间，零 RPC，来自 byId.updatedAt）
+  //   运行·活跃（绿）/ 运行·工具执行中·静默中（黄）/ 运行·疑似卡死（红，脉冲）
+  //   —— 运行时 10s 轮询 tail history → host derive 健康分类；probe 未返回前
+  //   乐观显示「活跃」（避免胶囊闪烁）。空白新会话不显示。
+  // 点击：唤起会话流工作台并直达该会话详情（workbenchBridge 意图桥）。
+  // 槽位 props 兜底：v0.1.2 若 sessionId 标准 prop 管道变化，退回 sessions.list
+  // 快照的 current（头部胶囊面对的就是当前会话）。
+  const currentSessionIdOf = (sessions) => {
+    try {
+      const snap = sessions && sessions.list && typeof sessions.list.getSnapshot === 'function' ? sessions.list.getSnapshot() : null
+      return snap && snap.current ? snap.current : undefined
+    } catch (e) { return undefined }
+  }
+  // 【临时诊断】chipDbg 已于 v1.3.0 验收后撤除；probe error 静默（与总览探测同口径）。
+  function SessionHealthChip(props) {
+    const { connection, sessions } = props
+    const sid = props.sessionId || currentSessionIdOf(sessions)
+    const sessionId = sid
+    const [running, setRunning] = useState(false)
+    const [meta, setMeta] = useState({ updatedAt: 0, blank: false })
+    const [health, setHealth] = useState(null)
+    useEffect(() => {
+      if (!sessionId || !sessions || !sessions.list || typeof sessions.list.getSnapshot !== 'function') return undefined
+      const compute = () => {
+        try {
+          // sessions.list 快照 = { ids, current, byId }（byId[id] 含 running/updatedAt/blank）。
+          const snap = sessions.list.getSnapshot()
+          const it = snap && snap.byId ? snap.byId[sessionId] : undefined
+          setRunning(it ? it.running === true : false)
+          const u = it && typeof it.updatedAt === 'number' ? it.updatedAt : 0
+          const b = it ? it.blank === true : false
+          setMeta((prev) => (prev.updatedAt === u && prev.blank === b ? prev : { updatedAt: u, blank: b }))
+        } catch (e) { setRunning(false) }
+      }
+      compute()
+      if (typeof sessions.list.subscribe === 'function') return sessions.list.subscribe(compute)
+      return undefined
+    }, [sessions, sessionId])
+    useEffect(() => {
+      if (!running || !sessionId || !sfRemoteRef.current) { setHealth(null); return undefined }
+      let alive = true
+      const probe = async () => {
+        try {
+          const val = await sfRemoteRef.current.pageBySession(sessionId, 3)
+          const events = historyEventsOf(val)
+          if (events.length === 0) { if (alive) setHealth(null); return }
+          const d = await api('derive', { events, now: Date.now(), assumeRunning: true })
+          if (alive && d && d.ok) setHealth(d.health || null)
+        } catch (e) {}
+      }
+      probe()
+      const iv = setInterval(probe, 10000)
+      return () => { alive = false; clearInterval(iv) }
+    }, [running, sessionId, connection])
+    // 空闲态每 30s 轻 tick 一次，驱动「N 分钟前」相对时间保鲜。
+    const [, setTick] = useState(0)
+    useEffect(() => {
+      if (running) return undefined
+      const iv = setInterval(() => setTick((n) => n + 1), 30000)
+      return () => clearInterval(iv)
+    }, [running])
+    // 空闲计时基准 = 最后一条事件的 time（= 会话结束时刻）。byId.updatedAt 是
+    // 「列表投影上次变化」时间戳——运行中投影值不变就停在上次用户消息，语义不对
+    //（用户实测裁定）。空闲期间该时刻不再变化 → 会话切入空闲时拉一次即可。
+    const [idleSince, setIdleSince] = useState(0)
+    useEffect(() => {
+      if (running || !sessionId || !sfRemoteRef.current) { setIdleSince(0); return undefined }
+      let alive = true
+      ;(async () => {
+        try {
+          const val = await sfRemoteRef.current.pageBySession(sessionId, 3)
+          const events = historyEventsOf(val)
+          const last = events.length > 0 ? events[events.length - 1] : null
+          const t = last && typeof last.time === 'number' ? last.time : 0
+          if (alive) setIdleSince(t)
+        } catch (e) { if (alive) setIdleSince(0) }
+      })()
+      return () => { alive = false }
+    }, [running, sessionId])
+    if (!sessionId) return null
+    // 空闲常驻态：灰条 + 「距最后事件」相对时间。空白新会话不显示（避免噪音）。
+    if (!running) {
+      if (meta.blank) return null
+      const ago = idleSince > 0 ? fmtAgo(Date.now() - idleSince) : ''
+      return h('button', {
+        className: 'sf-healthChip hc-idle',
+        title: STR.healthChipTitle,
+        onClick: (e) => { e.stopPropagation(); if (props.onOpen) props.onOpen() },
+      },
+        h('span', { className: 'sf-hcBar' }),
+        h('span', { className: 'sf-hcLabel' }, STR.healthIdle + (ago ? ' · ' + ago : '')),
+      )
+    }
+    // 运行态：probe 未返回前乐观显示「活跃」（防闪烁）；derive ended/unknown 亦按活跃渲染。
+    let text = STR.healthActive, cls = 'hc-active', silent = ''
+    if (health) {
+      const kind = health.kind
+      silent = fmtSilent(health.idleMs)
+      if (kind === 'tool-wait') { text = STR.healthToolWait; cls = 'hc-wait' }
+      else if (kind === 'quiet') { text = STR.healthQuiet; cls = 'hc-wait' }
+      else if (kind === 'stalled') { text = STR.healthStalled; cls = 'hc-stall' }
+    }
+    return h('button', {
+      className: 'sf-healthChip ' + cls,
+      title: STR.healthChipTitle,
+      onClick: (e) => { e.stopPropagation(); if (props.onOpen) props.onOpen() },
+    },
+      h('span', { className: 'sf-hcBar' }),
+      h('span', { className: 'sf-hcLabel' }, text + (silent && cls !== 'hc-active' ? ' · ' + silent : '')),
+    )
+  }
+
+  // 工作台打开意图桥：头部芯片点击 → 唤起工作台并直达该会话详情。
+  // （工厂作用域：芯片渲染于官方槽位，与本插件视图分属不同 React 子树。）
+  const workbenchBridge = {
+    intent: null,
+    listeners: new Set(),
+    open(sid) { this.intent = sid; for (const fn of [...this.listeners]) fn(sid) },
+    subscribe(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn) },
+  }
+
+  // ── 总览页 ──────────────────────────────────────────────────────────
+  // props: { onOpen: (session) => void, onClose: () => void }
+  function SessionFlowOverview(props) {
+    const [state, setState] = useState({ phase: 'loading', error: null, data: null })
+    const [query, setQuery] = useState('')
+    const [wsFilter, setWsFilter] = useState('')
+    const [sort, setSort] = useState('recent') // 默认：最近运行（最后活动时间）
+    const [showEmpty, setShowEmpty] = useState(false) // 默认隐藏空会话
+    const [showIssues, setShowIssues] = useState(false) // 问题速览：只看有错误记录的会话
+    // 缓存管理面板。
+    const [cacheOpen, setCacheOpen] = useState(false)
+    const [cacheInfo, setCacheInfo] = useState(null)
+    const [cacheBusy, setCacheBusy] = useState(false)
+    const [cacheMsg, setCacheMsg] = useState('')
+    // 方向 A：跨会话全文检索（防抖 500ms；AbortController 取消；结果区渲染）。
+    const [fullText, setFullText] = useState(null) // {phase:'searching'|'done'|'error', query, results, scanned, total, hasMore, error}
+    const fullTextAbort = useRef(null)
+    const fullTextTimer = useRef(null)
+    // M8a：当前编辑重命名的会话 id（null = 无编辑态）。
+    const [renamingId, setRenamingId] = useState(null)
+    // M8a：保存自定义标题 → 更新本地列表数据（userTitle 覆盖显示，不整页重刷）。
+    // 对齐官方（2026-08 起）：非空标题且连接可用时优先走官方 session.rename RPC
+    // （log-backed，官方侧栏同步）；空标题（清除）/官方拒绝（子代理 agent-busy 等）回退 legacy renames.json。
+    const saveRename = (sid, title) => {
+      const conn = props.connection
+      const applyLocal = (userTitle) => {
+        setState((prev) => {
+          if (!prev || !prev.data) return prev
+          return {
+            ...prev,
+            data: {
+              ...prev.data,
+              workspaces: (prev.data.workspaces || []).map((g) => ({
+                ...g,
+                sessions: (g.sessions || []).map((s) => (s.id === sid ? { ...s, userTitle } : s)),
+              })),
+            },
+          }
+        })
+        setRenamingId(null)
+        return true
+      }
+      const legacy = () => api('rename', { sessionId: sid, title }).then((json) => {
+        if (json && json.ok) return applyLocal(json.userTitle)
+        throw new Error((json && json.error) || STR.renameFail)
+      })
+      const trimmed = String(title || '').trim()
+      // 官方 user 标题不可经本插件清空（官方服务无删除语义）：阻止并提示。
+      if (trimmed === '') {
+        const all = ((state.data && state.data.workspaces) || []).flatMap((g) => g.sessions || [])
+        const target = all.find((x) => x.id === sid)
+        if (target && target.titleSource === 'user') return Promise.reject(new Error(STR.renameClearBlocked))
+      }
+      if (trimmed !== '' && sfRemoteRef.current && sfRemoteRef.current.canRename) {
+        return sfRemoteRef.current.rename(sid, trimmed)
+          .then((accepted) => { if (typeof accepted !== 'string') throw new Error(STR.renameFail); return accepted })
+          .then((accepted) => applyLocal(accepted))
+          .catch(() => legacy())
+      }
+      return legacy()
+    }
+    // ── 卡死监控：总览探测 ─────────────────────────────────────────────
+    // 官方 sessions.list 的 running（attached agent 真实状态，比 15 分钟启发式准）+
+    // tail history → host derive 健康分类。30s 轮询，上限 8 个、并发 3。
+    const [healthMap, setHealthMap] = useState({})
+    const [liveRunning, setLiveRunning] = useState(null) // null=未探测；Set<sessionId>
+    useEffect(() => {
+      if (!sfRemoteRef.current || state.phase !== 'ready') return undefined
+      let alive = true
+      let probing = false
+      const probe = async () => {
+        if (probing) return
+        probing = true
+        try {
+          const val = await sfRemoteRef.current.listSessions()
+          const items = (val && val.items) || []
+          const runningIds = items.filter((i) => i.running === true).map((i) => i.sessionId)
+          if (!alive) return
+          setLiveRunning(new Set(runningIds))
+          const next = {}
+          for (let i = 0; i < Math.min(runningIds.length, 8); i += 3) {
+            await Promise.all(runningIds.slice(i, i + 3).map(async (sid) => {
+              try {
+                const events = historyEventsOf(await sfRemoteRef.current.pageBySession(sid, 3))
+                if (events.length === 0) return
+                const d = await api('derive', { events, now: Date.now(), assumeRunning: true })
+                if (d && d.ok && d.health) next[sid] = d.health
+              } catch {}
+            }))
+            if (!alive) return
+          }
+          if (alive) setHealthMap(next)
+        } catch {} finally { probing = false }
+      }
+      probe()
+      const iv = setInterval(probe, 30000)
+      return () => { alive = false; clearInterval(iv) }
+    }, [props.connection, state.phase])
+    // 头部芯片直达：工作台打开意图 → 列表就绪后自动进入该会话详情（每个意图只消费一次）。
+    // T3 修复：无论命中与否都标记消费 + 通知父级清意图——此前 Overview 卸载（进详情）后
+    // intentConsumed ref 随之丢失，「← 返回」重挂 Overview 时旧意图被再次消费，
+    // 表现为返回后又被拉回详情（用户实测）；未命中时也消费，避免每次重挂都重试查找。
+    const intentConsumed = useRef(null)
+    useEffect(() => {
+      if (!props.intentId || intentConsumed.current === props.intentId || state.phase !== 'ready') return
+      intentConsumed.current = props.intentId
+      if (props.onIntentConsumed) props.onIntentConsumed()
+      const all = ((state.data && state.data.workspaces) || []).flatMap((g) => g.sessions || [])
+      const target = all.find((x) => x.id === props.intentId)
+      if (target) props.onOpen(target)
+    }, [props.intentId, state.phase])
+    useEffect(() => () => {
+      if (fullTextTimer.current) clearTimeout(fullTextTimer.current)
+      if (fullTextAbort.current) fullTextAbort.current.abort()
+    }, [])
+    useEffect(() => {
+      const q = query.trim()
+      const isStructured = /^(tool|file|path|err|error):/i.test(q)
+      if (fullTextTimer.current) clearTimeout(fullTextTimer.current)
+      if (fullTextAbort.current) { fullTextAbort.current.abort(); fullTextAbort.current = null }
+      // 结构化前缀走元数据筛选（已有）；自由文本 ≥2 字符才触发全文检索。
+      if (q.length < 2 || isStructured) { setFullText(null); return }
+      fullTextTimer.current = setTimeout(() => {
+        const ctrl = new AbortController()
+        fullTextAbort.current = ctrl
+        setFullText({ phase: 'searching', query: q, results: null, scanned: 0, total: 0, hasMore: false, error: '' })
+        api('searchAll', { query: q, workspace: wsFilter || undefined }, ctrl.signal).then((json) => {
+          if (json && json.ok) {
+            setFullText({ phase: 'done', query: q, results: json.results || [], scanned: json.scanned || 0, total: json.total || 0, hasMore: json.hasMore === true, error: '' })
+          } else {
+            setFullText((p) => p && p.query === q ? { phase: 'error', query: q, results: null, scanned: 0, total: 0, hasMore: false, error: (json && json.error) || STR.fullTextFail } : p)
+          }
+        }).catch((e) => {
+          if (e && e.name === 'AbortError') return
+          setFullText((p) => p && p.query === q ? { phase: 'error', query: q, results: null, scanned: 0, total: 0, hasMore: false, error: String(e && e.message || e) } : p)
+        })
+      }, 500)
+    }, [query, wsFilter])
+    // 命中跳转：localStorage 桥（会话流标签页读取后执行会话内检索定位）+ 原生打开会话。
+    const openFullTextHit = (hit) => {
+      try {
+        // 预写目标会话的 chat store view='session-flow'：会话打开时（store 按会话重建并
+        // rehydrate localStorage）自动激活「会话流」标签页，而非停在默认 Chat 标签。
+        const storeKey = 'dsh.conversation.chat.' + hit.sessionId
+        let st = {}
+        try { const raw = localStorage.getItem(storeKey); if (raw) st = JSON.parse(raw) } catch (e) {}
+        st.view = 'session-flow'
+        localStorage.setItem(storeKey, JSON.stringify(st))
+        localStorage.setItem(PENDING_SEARCH_KEY, JSON.stringify({ sessionId: hit.sessionId, query: query.trim() }))
+      } catch (e) {}
+      try { props.sessions.open(hit.sessionId) } catch (e) { console.warn('[dsh-session-flow] open failed', hit.sessionId, e) }
+      // 关闭工作台（中栏交还给会话），用户直接看到目标会话的会话流标签页——
+      // 否则工作台仍覆盖中栏，需手动点侧边栏才可见（实测踩坑）。
+      try { if (props.onClose) props.onClose() } catch (e) {}
+    }
+    const fmtBytes = (b) => {
+      if (b === null || b === undefined) return '—'
+      if (b < 1024) return b + ' B'
+      if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KiB'
+      return (b / 1024 / 1024).toFixed(1) + ' MiB'
+    }
+    const loadCacheInfo = () => {
+      api('cacheInfo').then((json) => {
+        if (json && json.ok) setCacheInfo(json)
+      }).catch(() => {})
+    }
+    // 打开缓存面板时默认自动刷新一次，避免首次进入数据为空。
+    useEffect(() => {
+      if (cacheOpen) loadCacheInfo()
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [cacheOpen])
+    const cleanCache = (what) => {
+      setCacheBusy(true)
+      setCacheMsg('')
+      api('cacheClean', { what }).then((json) => {
+        if (json && json.ok) {
+          setCacheMsg(STR.cacheDone + ': ' + json.removed + ' 个文件 / ' + fmtBytes(json.bytes))
+          loadCacheInfo()
+        } else {
+          setCacheMsg((json && json.error) || 'failed')
+        }
+      }).catch((e) => setCacheMsg(String(e))).finally(() => setCacheBusy(false))
+    }
+
+    // 空会话判断：优先用索引标记，兼容旧缓存按内容指标兜底。
+    const isSessionEmpty = (s) =>
+      s.empty === true ||
+      (!(s.userMessages || 0) && !(s.toolCalls || 0) && !(s.turns || 0))
+
+    // 工作区显示名：与左侧栏一致只留最后一级目录；完整路径放 title（悬浮显示）。
+    // 注意：必须在 useMemo 之前定义（const 的 TDZ——useMemo 回调先于其初始化执行会报错）。
+    const wsLabelOf = (g) => g.label || g.name
+    const wsCwdOf = (g) => g.cwd || null
+
+    const load = () => {
+      setState({ phase: 'loading', error: null, data: null })
+      api('list').then((json) => {
+        if (json && json.ok) setState({ phase: 'ready', error: null, data: json })
+        else setState({ phase: 'error', error: (json && json.error) || 'list failed', data: null })
+      }).catch((e) => setState({ phase: 'error', error: String(e), data: null }))
+    }
+    useEffect(() => { load() }, [])
+
+    const rescan = () => {
+      setState({ phase: 'loading', error: null, data: null })
+      api('rescan', { force: true }).then((json) => {
+        if (json && json.ok) setState({ phase: 'ready', error: null, data: json })
+        else setState({ phase: 'error', error: (json && json.error) || 'rescan failed', data: null })
+      }).catch((e) => setState({ phase: 'error', error: String(e), data: null }))
+    }
+
+    const rows = useMemo(() => {
+      const ws = (state.data && state.data.workspaces) || []
+      const q = query.trim().toLowerCase()
+      // M5c 结构化检索前缀：tool: / file: / path: / err: / error:
+      const st = /^(tool|file|path|err|error):(.*)$/.exec(q)
+      const stKind = st ? st[1].toLowerCase() : null
+      const stVal = st ? st[2].trim().toLowerCase() : ''
+      const out = []
+      for (const group of ws) {
+        for (const s of group.sessions) {
+          if (wsFilter !== '' && wsFilter !== group.name) continue
+          // 子代理会话：不从总览混入，从详情页「血缘」树进入。
+          if (s.parentSession) continue
+          if (!showEmpty && isSessionEmpty(s)) continue // 默认隐藏空会话
+          if (showIssues && !(s.toolErrors > 0)) continue // 问题速览：只看有错误记录的会话
+          if (q !== '') {
+            if (st) {
+              // 结构化：按工具名 / 文件路径 / 错误信号精确检索。
+              if (stKind === 'tool') {
+                if (!(s.toolNames || []).some((n) => n.toLowerCase().includes(stVal))) continue
+              } else if (stKind === 'file' || stKind === 'path') {
+                if (!(s.artifactPaths || []).some((p) => p.toLowerCase().includes(stVal))) continue
+              } else {
+                if (!(s.toolErrors > 0)) continue
+              }
+            } else {
+              // 自由文本：标题/工作区/ID/cwd + 工具名 + 文件路径宽松匹配。
+              const hay = String(s.title || '') + ' ' + group.name + ' ' + String(s.id || '') + ' ' + String(s.cwd || '') +
+                ' ' + (s.toolNames || []).join(' ') + ' ' + (s.artifactPaths || []).join(' ')
+              if (!hay.toLowerCase().includes(q)) continue
+            }
+          }
+          const now = Date.now()
+          // 卡死监控：官方探测过（liveRunning 非 null）则以 attached agent 真实状态为准，
+          // 否则回退 15 分钟活动窗口启发式。
+          const running = liveRunning === null
+            ? s.lastEventTime !== null && s.lastEventTime !== undefined && (now - s.lastEventTime) < ACTIVE_WINDOW_MS
+            : liveRunning.has(s.id)
+          out.push({ ...s, workspace: group.name, workspaceLabel: wsLabelOf(group), workspaceCwd: wsCwdOf(group), running, isEmpty: isSessionEmpty(s) })
+        }
+      }
+      // 排序：除「最早创建」外均按降序。默认「最近运行」= 最后活动时间（lastEventTime）。
+      const key = (r) => {
+        if (sort === 'recent') return r.lastEventTime || 0
+        if (sort === 'newest') return r.createdAt || 0
+        if (sort === 'oldest') return r.createdAt || 0
+        if (sort === 'tools') return r.toolCalls || 0
+        if (sort === 'longest') return (r.lastEventTime || 0) - (r.createdAt || 0)
+        if (sort === 'size') return r.sizeBytes || 0
+        return 0
+      }
+      const ascending = sort === 'oldest'
+      out.sort((a, b) => (ascending ? key(a) - key(b) : key(b) - key(a)))
+      return out
+    }, [state.data, query, wsFilter, sort, showEmpty, showIssues, liveRunning])
+
+    // M5b 档案统计：聚合工具出现热度与问题会话数，跟随选中的工作区（wsFilter）变化。
+    const stats = useMemo(() => {
+      const toolAgg = new Map()
+      let issues = 0
+      let roots = 0
+      let totalSize = 0
+      for (const g of (state.data && state.data.workspaces) || []) {
+        if (wsFilter !== '' && wsFilter !== g.name) continue // 统计范围 = 当前选中的工作区
+        for (const s of g.sessions) {
+          if (s.parentSession) continue
+          roots++
+          if (s.toolErrors > 0) issues++
+          totalSize += s.sizeBytes || 0
+          for (const n of s.toolNames || []) toolAgg.set(n, (toolAgg.get(n) || 0) + 1)
+        }
+      }
+      const topTools = [...toolAgg.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6)
+      return { topTools, issues, roots, totalSize }
+    }, [state.data, wsFilter])
+
+    const wsNames = ((state.data && state.data.workspaces) || []).map((g) => g.name)
+    // 各工作区的会话计数（含空会话，反映磁盘全貌）。
+    const wsCounts = new Map(((state.data && state.data.workspaces) || []).map((g) => [g.name, g.sessionCount]))
+    const totalCount = ((state.data && state.data.workspaces) || []).reduce((a, g) => a + g.sessionCount, 0)
+
+    const FOLDER_ICON = `<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 4.5a1 1 0 0 1 1-1h3.6l1.5 1.8h5.9a1 1 0 0 1 1 1v5.2a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/></svg>`
+    const FILTER_ICON = `<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M2.5 4.5h11M4.5 8h7M6.5 11.5h3"/></svg>`
+
+    return h('div', { className: 'sf-view' },
+      h('div', { className: 'sf-viewHeader' },
+        h('h2', { className: 'sf-viewTitle' }, STR.title),
+        h('input', {
+          className: 'sf-input', style: { flex: '1 1 200px', minWidth: 160 },
+          placeholder: STR.search, value: query,
+          onChange: (e) => setQuery(e.target.value),
+        }),
+        h('select', { className: 'sf-input', value: sort, onChange: (e) => setSort(e.target.value) },
+          h('option', { value: 'recent' }, STR.sortRecent),
+          h('option', { value: 'newest' }, STR.sortNewest),
+          h('option', { value: 'oldest' }, STR.sortOldest),
+          h('option', { value: 'tools' }, STR.sortTools),
+          h('option', { value: 'longest' }, STR.sortLongest),
+          h('option', { value: 'size' }, STR.sortSize),
+        ),
+        h('label', { className: 'sf-muted', style: { display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer', whiteSpace: 'nowrap' } },
+          h('input', { type: 'checkbox', checked: showEmpty, onChange: (e) => setShowEmpty(e.target.checked) }),
+          STR.showEmpty,
+        ),
+        h('button', { className: 'sf-btn', onClick: rescan, disabled: state.phase === 'loading' },
+          state.phase === 'loading' ? STR.scanning : STR.rescan),
+        h('button', { className: 'sf-btn' + (cacheOpen ? ' sf-btnActive' : ''), onClick: () => setCacheOpen(!cacheOpen) }, STR.cache),
+        h('button', { className: 'sf-btn', onClick: props.onClose }, '✕ ' + STR.close),
+      ),
+      // 方向 A：跨会话全文检索结果区（防抖触发；与元数据筛选结果分区展示）。
+      fullText && h('div', { className: 'sf-fulltext' },
+        h('div', { className: 'sf-fulltextHead' },
+          h('span', { className: 'sf-fulltextTitle' }, STR.fullText + '「' + fullText.query + '」'),
+          fullText.phase === 'searching' && h('span', { className: 'sf-muted' }, STR.fullTextSearching),
+          fullText.phase === 'done' && fullText.hasMore && h('span', { className: 'sf-muted' },
+            STR.fullTextPartial.replace('{N}', String(fullText.scanned)).replace('{M}', String(fullText.total))),
+        ),
+        fullText.phase === 'error' && h('div', { className: 'sf-hint', style: { color: '#d43b3b' } }, STR.fullTextFail + ': ' + fullText.error),
+        fullText.phase === 'done' && fullText.results.length === 0 && h('div', { className: 'sf-hint' }, STR.fullTextNone),
+        fullText.phase === 'done' && fullText.results.map((hit) =>
+          h('div', { key: hit.sessionId, className: 'sf-fulltextHit', onClick: () => openFullTextHit(hit) },
+            h('div', { className: 'sf-fulltextHitTitle' },
+              h('span', { className: 'sf-fulltextName' }, hit.userTitle || hit.title),
+              h('span', { className: 'sf-fulltextCount' }, hit.matchCount),
+            ),
+            h('div', { className: 'sf-muted', style: { marginTop: 2 } },
+              (hit.matches[0] ? hit.matches[0].preview : '') + ' · ' + hit.workspace),
+          ),
+        ),
+      ),
+      // 缓存管理面板：仅本插件缓存，查看体积 + 分类清理（清理后自动重建，无需重启）。
+      cacheOpen && h('div', { className: 'sf-cachePanel' },
+        h('div', { className: 'sf-muted', style: { flex: 'none' } }, STR.cacheHint),
+        h('div', { className: 'sf-cacheRow' },
+          h('span', { className: 'sf-cacheLabel' }, STR.cacheTotal),
+          h('span', { className: 'sf-cacheValue' }, cacheInfo ? fmtBytes(cacheInfo.totalBytes) : '…'),
+          h('button', { className: 'sf-btn', style: { marginLeft: 'auto' }, onClick: loadCacheInfo, disabled: cacheBusy }, '↻'),
+        ),
+        h('div', { className: 'sf-cacheRow' },
+          h('span', { className: 'sf-cacheLabel' }, STR.cacheIndex + ' (' + (cacheInfo ? cacheInfo.indexFiles.length : '…') + ')'),
+          h('span', { className: 'sf-cacheValue' }, cacheInfo ? fmtBytes(cacheInfo.indexBytes) : ''),
+        ),
+        h('div', { className: 'sf-cacheRow' },
+          h('span', { className: 'sf-cacheLabel' }, STR.cacheTimeline + ' (' + (cacheInfo ? cacheInfo.timelineFiles.length : '…') + ')'),
+          h('span', { className: 'sf-cacheValue' }, cacheInfo
+            ? fmtBytes(cacheInfo.timelineBytes) + ' / ' + STR.cacheLimit + ' ' + fmtBytes(cacheInfo.timelineLimit)
+            : ''),
+          h('button', { className: 'sf-btn', style: { marginLeft: 'auto' }, onClick: () => cleanCache('timeline'), disabled: cacheBusy }, STR.cleanTimeline),
+          h('button', { className: 'sf-btn sf-btnDanger', onClick: () => cleanCache('all'), disabled: cacheBusy }, STR.cleanAll),
+        ),
+        cacheMsg && h('div', { className: 'sf-muted' }, cacheMsg),
+        (!cacheInfo || (cacheInfo.totalBytes === 0)) && h('div', { className: 'sf-muted' }, STR.cacheEmpty),
+      ),
+      // 工作区筛选 tabs：独立一行，醒目可见，点击切换；只显示末级目录名，悬浮显示完整路径。
+      h('div', { className: 'sf-wsTabs' },
+        h('button', { className: 'sf-wsTab', 'data-active': wsFilter === '' ? 'true' : undefined, onClick: () => setWsFilter('') },
+          h('span', { className: 'sf-wsTabName' }, STR.allWorkspaces),
+          h('span', { className: 'sf-wsTabCount' }, totalCount),
+        ),
+        ((state.data && state.data.workspaces) || []).map((g) =>
+          h('button', {
+            key: g.name, className: 'sf-wsTab', title: g.cwd || g.name,
+            'data-active': wsFilter === g.name ? 'true' : undefined,
+            onClick: () => setWsFilter(g.name),
+          },
+            h('span', { className: 'sf-wsTabName' }, wsLabelOf(g)),
+            h('span', { className: 'sf-wsTabCount' }, wsCounts.get(g.name) || 0),
+          )),
+      ),
+      // M5b 档案统计条：工具使用热度 + 问题会话速览。
+      state.phase === 'ready' && h('div', { className: 'sf-statsBar' },
+        h('span', { className: 'sf-statsLabel' }, STR.toolTop),
+        stats.topTools.map(([name, cnt]) =>
+          h('span', { key: name, className: 'sf-statChip', title: name + ' · ' + cnt + ' 个会话' },
+            h('span', {}, name),
+            h('span', { className: 'sf-statCount' }, cnt),
+          )),
+        h('button', {
+          className: 'sf-statChip' + (showIssues ? ' active' : ' clickable'),
+          title: STR.issuesHint,
+          onClick: () => setShowIssues(!showIssues),
+        },
+          h('span', {}, '⚠ ' + STR.issues),
+          h('span', { className: 'sf-statCount err' }, stats.issues),
+        ),
+        h('span', { className: 'sf-statChip', title: STR.storageHint },
+          h('span', {}, STR.storage),
+          h('span', { className: 'sf-statCount' }, fmtSize(stats.totalSize)),
+        ),
+      ),
+      state.phase === 'loading' && h('div', { className: 'sf-hint' }, STR.scanning),
+      state.phase === 'error' && h('div', { className: 'sf-hint', style: { color: '#d43b3b' } }, STR.loadFailed + ': ' + String(state.error)),
+      state.phase === 'ready' && h('div', { className: 'sf-body' },
+        rows.length === 0 && h('div', { className: 'sf-hint' }, STR.noMatch),
+        rows.map((s) =>
+          h('div', {
+            key: s.id, className: 'sf-card', title: s.id,
+            onClick: () => { props.onOpen(s, query) },
+          },
+            // 工作区行：只显示末级目录名（与左侧栏一致），悬浮显示完整路径；点击即筛选到该工作区。
+            h('div', {
+              className: 'sf-cardWs', title: s.workspaceCwd || s.workspace,
+              onClick: (e) => { e.stopPropagation(); setWsFilter(s.workspace) },
+            },
+              h('span', { className: 'sf-cardWsIcon', dangerouslySetInnerHTML: { __html: FOLDER_ICON } }),
+              h('span', { className: 'sf-cardWsName' }, s.workspaceLabel || s.workspace),
+              h('span', { className: 'sf-cardWsFilter', dangerouslySetInnerHTML: { __html: FILTER_ICON } }),
+            ),
+            h('div', { className: 'sf-cardTitle' },
+              renamingId === s.id
+                ? h(RenameInline, {
+                    initial: (props.liveTitles && props.liveTitles[s.id]) || s.userTitle || s.title || '',
+                    onSave: (t) => saveRename(s.id, t),
+                    onCancel: () => setRenamingId(null),
+                  })
+                : h('span', { className: 'sf-cardText', style: { overflow: 'hidden', textOverflow: 'ellipsis' } },
+                    // 显示优先级：mux 近实时官方标题 > userTitle（档案 user/遗留 overlay）> 自动标题。
+                    (props.liveTitles && props.liveTitles[s.id]) || s.userTitle || s.title || STR.unknownTitle,
+                    (s.userTitle || (props.liveTitles && props.liveTitles[s.id])) && h('span', { className: 'sf-origTitle', title: s.title || STR.unknownTitle },
+                      STR.origTitle + ': ' + (s.title || STR.unknownTitle)),
+                    h('button', {
+                      className: 'sf-renameBtn', title: STR.rename,
+                      onClick: (e) => { e.stopPropagation(); setRenamingId(s.id) },
+                    }, '✎'),
+                  ),
+              s.isEmpty && h('span', { className: 'sf-badge sf-badgeEnd' }, STR.emptySession),
+              s.running ? h('span', { className: 'sf-badge sf-badgeRun' }, STR.running) : h('span', { className: 'sf-badge sf-badgeEnd' }, STR.ended),
+              healthBadge(healthMap[s.id]),
+              s.delegationDepth > 0 && h('span', { className: 'sf-badge sf-badgeSub' }, STR.subagent + ' · d' + s.delegationDepth),
+              s.toolErrors > 0 && h('span', { className: 'sf-badge sf-badgeErr' }, STR.errors + ': ' + s.toolErrors),
+            ),
+            // 候选 B：最近结论（主行）+ 首个任务（小字）；无值不渲染；hover 悬浮全文。
+            s.lastConclusion && h('div', { className: 'sf-cardConclusion', title: s.lastConclusion },
+              h('span', { className: 'sf-cardTag' }, STR.conclusion),
+              h('span', { className: 'sf-cardConclusionText' }, s.lastConclusion),
+            ),
+            s.firstTask && h('div', { className: 'sf-cardTask', title: s.firstTask },
+              h('span', { className: 'sf-cardTag' }, STR.task),
+              h('span', { className: 'sf-cardTaskText' }, s.firstTask),
+            ),
+            h('div', { className: 'sf-muted' },
+              h('span', {}, fmtTime(s.createdAt)),
+              h('span', { style: { marginLeft: 8 } }, STR.duration + ' ' + fmtDuration(s.lastEventTime - s.createdAt)),
+            ),
+            h('div', { className: 'sf-statsRow sf-muted' },
+              h('span', {}, STR.turns + ' ' + (s.turns || 0)),
+              h('span', {}, STR.steps + ' ' + (s.steps || 0)),
+              h('span', {}, STR.tools + ' ' + (s.toolCalls || 0)),
+              h('span', {}, STR.msgs + ' ' + ((s.userMessages || 0) + (s.assistantMessages || 0))),
+              h('span', {}, STR.records + ' ' + (s.recordCount || 0)),
+              h('span', {}, STR.size + ' ' + fmtSize(s.sizeBytes)),
+            ),
+            h('div', { className: 'sf-mono sf-muted', style: { marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+              s.cwd || s.id),
+          )),
+      ),
+    )
+  }
+
+  // ── 折叠时间线渲染（详情页 / 血缘子代理详情 共用）──────────────────
+  // props: { turns, collapsed: Set, toggle: (key) => void, onOpenSubagent?: (childId) => void, hideHead?: boolean }
+  // 渐进披露：回合/用户发言/最终结论默认可见（行数 clamp），工具默认折叠；真实时间序。
+  function TimelineTurns(props) {
+    const { turns, collapsed, toggle, onOpenSubagent, hideHead, liveActive, activeTurn } = props
+    const turnList = turns || []
+    return turnList.map((t, tIdx) => {
+      const tKey = 'turn-' + t.turn
+      const tCollapsed = collapsed.has(tKey)
+      const isActive = activeTurn === t.turn // 当前选中回合（点击定位后高亮）
+      const tc = t.steps.reduce((a, s) => a + s.toolCalls.length, 0)
+      const te = t.steps.reduce((a, s) => a + s.toolCalls.filter((c) => c.isError).length, 0)
+      // 结论标记：该回合时间序中最后一条含正文的助手消息。
+      const assistantItems = (t.items || []).filter((i) => i.kind === 'assistant' && i.hasText)
+      const finalSeq = assistantItems.length > 0 ? assistantItems[assistantItems.length - 1].seq : null
+      // 运行中回合判定（实时模式且会话活跃时）：最后一个回合，或含未完成工具调用
+      // （resultTime === null，工具仍在执行）的回合 → 高亮 + 底部动态生成标志。
+      const hasUnfinishedTool = (t.steps || []).some((s) => (s.toolCalls || []).some((c) => c.resultTime === null))
+      const isLiveTurn = liveActive === true && (tIdx === turnList.length - 1 || hasUnfinishedTool)
+      const turnCls = 'sf-turn' + (isLiveTurn ? ' sf-turnLive' : '') + (isActive ? ' sf-turnSelected' : '')
+      return h('div', { key: tKey, id: 'sf-turn-' + t.turn, className: turnCls },
+        !hideHead && h('div', { className: 'sf-turnHead' + (isLiveTurn ? ' sf-turnHeadLive' : ''), onClick: () => { toggle(tKey); setActiveTurn && setActiveTurn(t.turn) } },
+          h('span', { style: { fontWeight: 600 } }, STR.turns + ' ' + t.turn),
+          isLiveTurn && h('span', { className: 'sf-badge sf-badgeRun' }, STR.liveTurn),
+          h('span', { className: 'sf-muted' }, STR.tools + ' ' + tc + (te > 0 ? ' · ' + STR.errors + ' ' + te : '')),
+          h('span', { className: 'sf-muted' }, fmtTime(t.startTime) + (t.endTime ? ' → ' + fmtTime(t.endTime) : '')),
+          h('span', { className: 'sf-muted', style: { marginLeft: 'auto' } }, tCollapsed ? STR.expanded : STR.collapsed),
+        ),
+        !tCollapsed && h('div', { className: 'sf-turnBody' },
+          // 按真实时间序渲染（items 由 host 按事件 seq 交织生成）：
+          // 用户发言 → 助手思考/回复 → 工具调用 … 完全遵循发生顺序。
+          (t.items || []).map((it) => {
+            if (it.kind === 'user') {
+              const uKey = 'msg-' + it.seq
+              const open = !collapsed.has(uKey)
+              return h('div', { key: uKey, id: 'sf-msg-' + it.seq, className: 'sf-msg sf-msgUser' },
+                h('div', { className: 'sf-msgRole' }, STR.user),
+                // 用户发言：核心内容默认可见，超过 5 行折叠（点击展开/收起）。
+                h('div', { className: 'sf-msgText' + (open ? ' sf-open' : ''), onClick: () => toggle(uKey), title: open ? STR.collapsed : STR.expanded }, it.preview),
+                h('button', { className: 'sf-msgToggle', onClick: () => toggle(uKey) }, open ? STR.collapsed : STR.expanded),
+              )
+            }
+            if (it.kind === 'inject') {
+              // 智能体/插件注入的信息：灰色标记，不进「用户发言」大纲。
+              const uKey = 'msg-' + it.seq
+              const open = !collapsed.has(uKey)
+              return h('div', { key: uKey, id: 'sf-msg-' + it.seq, className: 'sf-msg sf-msgInject' },
+                h('div', { className: 'sf-msgRole' },
+                  STR.user,
+                  h('span', { className: 'sf-injectBadge' }, STR.injected + ' · ' + (it.sourceKind || '?')),
+                ),
+                h('div', { className: 'sf-msgTextInject' + (open ? ' sf-open' : ''), onClick: () => toggle(uKey), title: open ? STR.collapsed : STR.expanded }, it.preview),
+                h('button', { className: 'sf-msgToggle', onClick: () => toggle(uKey) }, open ? STR.collapsed : STR.expanded),
+              )
+            }
+            if (it.kind === 'assistant') {
+              const aKey = 'msg-' + it.seq
+              const thinkKey = 'think-' + it.seq
+              const open = !collapsed.has(aKey)
+              const thinkOpen = !collapsed.has(thinkKey)
+              const isFinal = it.seq === finalSeq
+              return h('div', { key: aKey, className: 'sf-msg sf-msgAssistant' },
+                h('div', { className: 'sf-msgRole' },
+                  STR.assistant,
+                  isFinal && h('span', { className: 'sf-badge sf-badgeRun', style: { marginLeft: 8 } }, STR.conclusion),
+                ),
+                // 思考内容：默认只显示 2 行，点击展开/收起。
+                it.hasThinking && h('div', { className: 'sf-thinking' + (thinkOpen ? ' sf-open' : ''), onClick: () => toggle(thinkKey), title: thinkOpen ? STR.collapsed : STR.expanded },
+                  h('span', { className: 'sf-thinkingLabel' }, STR.thinking),
+                  it.thinkingPreview,
+                ),
+                // 正文（最终结论）：核心内容默认可见，超过 5 行折叠。
+                it.hasText && h('div', { className: 'sf-msgText' + (open ? ' sf-open' : ''), onClick: () => toggle(aKey), title: open ? STR.collapsed : STR.expanded }, it.preview),
+                (it.hasThinking || it.hasText) && h('button', { className: 'sf-msgToggle', onClick: () => toggle(aKey) }, open ? STR.collapsed : STR.expanded),
+              )
+            }
+            if (it.kind === 'step') {
+              const s = t.steps.find((x) => x.step === it.step)
+              return h('div', { key: 'step-' + it.seq, className: 'sf-step' },
+                h('div', { className: 'sf-stepHead' },
+                  h('span', {}, STR.step + ' ' + it.step),
+                  s && h('span', {}, s.toolCalls.length + ' ' + STR.tools),
+                  s && s.endTime !== null && h('span', {}, fmtDuration(s.endTime - s.startTime)),
+                ),
+              )
+            }
+            if (it.kind === 'tool') {
+              const c = it.call
+              const cKey = 'tool-' + c.callId
+              const open = !collapsed.has(cKey)
+              const status = c.isError === true ? 'err' : (c.resultTime === null ? 'run' : 'ok')
+              return h('div', {
+                key: cKey, id: 'sf-tc-' + c.callId, className: 'sf-tool',
+              },
+                h('div', { className: 'sf-toolHead', onClick: () => toggle(cKey) },
+                  h('span', { className: 'sf-toolStatus ' + status }),
+                  h('span', { className: 'sf-toolName' }, c.name),
+                  h('span', { className: 'sf-muted' }, c.durationMs !== null ? fmtDuration(c.durationMs) : (c.resultTime === null ? '…' : '—')),
+                  c.isError === true && h('span', { className: 'sf-badge sf-badgeErr' }, STR.errors),
+                  // 子代理工具：一键跳转查看该子代理的实际执行内容。
+                  c.childSessionId && typeof onOpenSubagent === 'function' && h('button', {
+                    className: 'sf-btn', style: { padding: '1px 8px', fontSize: 11, flex: 'none' },
+                    onClick: (e) => { e.stopPropagation(); onOpenSubagent(c.childSessionId) },
+                  }, STR.viewSubagent),
+                  // 参数预览：代码标识符样式（等宽+底色+单行省略），与导出一致。
+                  h('span', { className: 'sf-toolArgPrev', title: c.argumentsText || c.argumentsPreview },
+                    c.argumentsPreview),
+                  h('span', { className: 'sf-muted' }, open ? STR.collapsed : STR.expanded),
+                ),
+                open && h('div', { className: 'sf-toolBody' },
+                  h('div', { className: 'sf-preLabel' }, STR.args + ' · json'),
+                  h('pre', { className: 'sf-pre' }, c.argumentsText || '—'),
+                  c.resultTime !== null && h('div', { className: 'sf-preLabel' }, STR.result + (c.isError ? ' · error' : ' · text')),
+                  c.resultTime !== null && h('pre', { className: 'sf-pre' + (c.isError ? ' err' : '') },
+                    c.resultText || '（空）'),
+                  (c.artifacts || []).length > 0 && h('div', { className: 'sf-preLabel' }, STR.artifacts),
+                  (c.artifacts || []).length > 0 && h('div', {},
+                    c.artifacts.map((p) => h('span', { key: p, className: 'sf-chip', title: p }, p))),
+                ),
+              )
+            }
+            return null
+          }),
+          // 运行中回合底部动态标志：AI 生成/任务执行中的提示（三点跳动省略号）。
+          isLiveTurn && !tCollapsed && h('div', { className: 'sf-liveTyping', 'aria-label': STR.liveGenerating },
+            h('span', { className: 'sf-liveDots' },
+              h('span', {}), h('span', {}), h('span', {}),
+            ),
+            h('span', { className: 'sf-muted' }, STR.liveGenerating),
+          ),
+        ),
+      )
+    })
+  }
+
+  // ── 回合摘要列表（秒开 + 默认折叠）────────────────────────────────
+  // props: { sessionId, lightTurns, collapsed: Set, toggle, ensureTurn, turnItems, onOpenSubagent }
+  // 每个回合默认折叠，只展示「用户发言 + 最终结论」摘要；展开时才按需加载完整时间线。
+  function TurnList(props) {
+    const { sessionId, lightTurns, collapsed, toggle, ensureTurn, turnItems, onOpenSubagent, activeTurn, onSelectTurn } = props
+    return (lightTurns || []).map((lt) => {
+      const tKey = 'turn-' + lt.turn
+      const isCollapsed = collapsed.has(tKey)
+      const full = turnItems.get(lt.turn)
+      const isActive = activeTurn === lt.turn
+      const onToggle = () => {
+        const expanding = isCollapsed
+        toggle(tKey)
+        if (expanding) ensureTurn(lt.turn) // 展开时按需加载完整时间线
+        if (typeof onSelectTurn === 'function') onSelectTurn(lt.turn)
+      }
+      return h('div', { key: tKey, id: 'sf-turn-' + lt.turn, className: 'sf-turn' + (isActive ? ' sf-turnSelected' : ''), 'data-loaded': full ? 'true' : undefined },
+        h('div', { className: 'sf-turnHead', onClick: onToggle },
+          h('span', { style: { fontWeight: 600 } }, STR.turns + ' ' + lt.turn),
+          h('span', { className: 'sf-muted' }, STR.tools + ' ' + lt.toolCount + (lt.errorCount > 0 ? ' · ' + STR.errors + ' ' + lt.errorCount : '')),
+          h('span', { className: 'sf-muted' }, fmtTime(lt.startTime) + (lt.endTime ? ' → ' + fmtTime(lt.endTime) : '')),
+          h('span', { className: 'sf-muted', style: { marginLeft: 'auto' } }, isCollapsed ? STR.expanded : STR.collapsed),
+        ),
+        // 折叠时展示摘要：用户发言 + 最终结论。
+        h('div', { className: 'sf-turnSummary', onClick: onToggle },
+          lt.userMessages.length > 0 && h('div', { className: 'sf-turnSummaryRow' },
+            h('span', { className: 'sf-turnSummaryTag user' }, STR.user),
+            h('span', { className: 'sf-turnSummaryText' }, lt.userMessages[lt.userMessages.length - 1].preview),
+          ),
+          lt.conclusionPreview && h('div', { className: 'sf-turnSummaryRow' },
+            h('span', { className: 'sf-turnSummaryTag ok' }, STR.conclusion),
+            h('span', { className: 'sf-turnSummaryText' }, lt.conclusionPreview),
+          ),
+        ),
+        !isCollapsed && h('div', { className: 'sf-turnBody' },
+          full
+            ? h(TimelineTurns, { turns: [full], collapsed, toggle, hideHead: true, onOpenSubagent })
+            : h('div', { className: 'sf-hint' }, STR.detailLoading),
+        ),
+      )
+    })
+  }
+
+  // ── 血缘树视图（M4）───────────────────────────────────────────────
+  // props: { sessionId, connection, onBack }
+  // 数据双通道：离线档案树（parentSession 链接，host lineage 方法）+ 运行时实时树
+  // （subagents.list 递归，在线子代理）。节点详情：离线 get 优先，回退运行时
+  // subagents.history → host derive 桥接 → 复用 TimelineTurns 折叠渲染。
+  function LineageView(props) {
+    const { sessionId, connection, initialSelectId } = props
+    const [offline, setOffline] = useState(null)
+    const [live, setLive] = useState(null)
+    const [liveState, setLiveState] = useState('none') // none/loading/ready
+    const [selected, setSelected] = useState(null)     // { id, label, parentId, mode }
+    const [detail, setDetail] = useState(null)         // { phase, timeline?, counts?, session? }
+    const [collapsed, setCollapsed] = useState(() => new Set())
+    const collapsedInit = useRef(false)
+    const selectHandled = useRef(false)
+
+    // 工具行「查看子代理」直达：树就绪后自动选中指定子代理并加载详情。
+    useEffect(() => {
+      if (!initialSelectId || selectHandled.current) return
+      if (selected !== null && selected.id === initialSelectId) { selectHandled.current = true; return }
+      const ready = offline !== null || liveState === 'ready'
+      if (!ready) return
+      const findIn = (nodes) => {
+        for (const n of nodes || []) {
+          if (n.id === initialSelectId) return n
+          const hit = findIn(n.children)
+          if (hit) return hit
+        }
+        return null
+      }
+      let node = null
+      if (liveState === 'ready') node = findIn(live) || null
+      if (!node && offline && offline.focus) node = findIn(offline.focus.children) || null
+      if (node) {
+        selectHandled.current = true
+        selectNode({ ...node, parentId: node.parentId, mode: node.mode })
+      }
+    }, [initialSelectId, offline, live, liveState, selected])
+
+    useEffect(() => {
+      let alive = true
+      api('lineage', { sessionId }).then((json) => {
+        if (alive && json && json.ok) setOffline(json)
+      }).catch(() => {})
+      if (connection !== undefined) {
+        setLiveState('loading')
+        const buildLiveTree = async (parentId) => {
+          const resp = await connection.api.subagents.list({ parentSessionId: parentId })
+          if (!resp || !resp.result || !resp.result.ok) return []
+          const entries = (resp.result.value && resp.result.value.entries || []).filter((e) => e.kind === 'child')
+          const nodes = []
+          for (const e of entries) {
+            const children = e.hasChildren ? await buildLiveTree(e.id) : []
+            nodes.push({ id: e.id, label: e.label || null, mode: e.mode, activity: e.activity, parentId, children })
+          }
+          return nodes
+        }
+        buildLiveTree(sessionId).then((nodes) => {
+          if (alive) { setLive(nodes); setLiveState('ready') }
+        }).catch(() => { if (alive) setLiveState('none') })
+      }
+      return () => { alive = false }
+    }, [sessionId])
+
+    // 默认折叠：选中子代理详情就绪后所有回合折叠（只显示摘要）。
+    useEffect(() => {
+      if (detail && detail.phase === 'ready' && !collapsedInit.current) {
+        collapsedInit.current = true
+        const all = new Set()
+        for (const lt of detail.lightTurns || []) all.add('turn-' + lt.turn)
+        setCollapsed(all)
+      }
+    }, [detail])
+
+    // 展开回合时按需加载完整时间线（getTurn，与详情页同一缓存）。
+    const [turnItems, setTurnItems] = useState(() => new Map())
+    const loadingTurns = useRef(new Set())
+    const ensureTurn = async (turnNo) => {
+      const sid = selected !== null ? selected.id : null
+      if (!sid || turnItems.has(turnNo) || loadingTurns.current.has(turnNo)) return
+      loadingTurns.current.add(turnNo)
+      try {
+        const json = await api('getTurn', { sessionId: sid, turn: turnNo })
+        if (json && json.ok && json.turn) {
+          setTurnItems((prev) => new Map(prev).set(turnNo, json.turn))
+        }
+      } catch (e) {
+        console.warn('[dsh-session-flow] getTurn failed', turnNo, e)
+      } finally {
+        loadingTurns.current.delete(turnNo)
+      }
+    }
+
+    const toggle = (key) => {
+      setCollapsed((prev) => {
+        const next = new Set(prev)
+        if (next.has(key)) next.delete(key)
+        else next.add(key)
+        return next
+      })
+    }
+
+    const selectNode = async (node) => {
+      setSelected(node)
+      collapsedInit.current = false
+      setCollapsed(new Set())
+      setTurnItems(new Map())
+      setDetail({ phase: 'loading' })
+      // 1) 离线档案优先（light：回合摘要 + 工具统计）
+      try {
+        const arch = await api('get', { sessionId: node.id })
+        if (arch && arch.ok) {
+          setDetail({ phase: 'ready', lightTurns: arch.lightTurns, toolStats: arch.toolStats, counts: arch.counts, session: arch.session })
+          return
+        }
+      } catch (e) {}
+      // 2) 运行时 history 桥接（在线子代理）→ host derive 得 light 结构
+      if (node.parentId !== undefined && sfRemoteRef.current) {
+        try {
+          const subVal = await sfRemoteRef.current.pageBySub(node.parentId, node.id, node.mode, 120)
+          const subEvents = historyEventsOf(subVal)
+          if (subEvents.length > 0) {
+            const events = subEvents
+            const derived = await api('derive', { events })
+            if (derived && derived.ok) {
+              // derive 返回完整 timeline——转成 light 结构
+              const turns = (derived.timeline && derived.timeline.turns) || []
+              const lightTurns = turns.map((t) => {
+                const toolCount = t.steps.reduce((a, s) => a + s.toolCalls.length, 0)
+                const errorCount = t.steps.reduce((a, s) => a + s.toolCalls.filter((c) => c.isError).length, 0)
+                const finals = t.assistantMessages.filter((a) => a.hasText)
+                return {
+                  turn: t.turn, startTime: t.startTime, endTime: t.endTime, toolCount, errorCount,
+                  userMessages: t.userMessages.map((u) => ({ seq: u.seq, preview: u.preview })),
+                  conclusionPreview: finals.length > 0 ? finals[finals.length - 1].preview : '',
+                }
+              })
+              setDetail({ phase: 'ready', lightTurns, counts: derived.counts, session: derived.session })
+              return
+            }
+          }
+        } catch (e) {}
+      }
+      setDetail({ phase: 'empty' })
+    }
+
+    // 树渲染（递归行）。
+    const renderNode = (node, depth, isLive) => {
+      const active = selected !== null && selected.id === node.id
+      const hasChildren = (node.children && node.children.length > 0)
+      // M8a：自定义标题优先（离线节点 host 已透传 userTitle；live 节点无此字段）。
+      const label = node.userTitle || node.label || node.title || node.id
+      const meta = isLive
+        ? ((node.mode === 'continuable' ? STR.modeContinuable : STR.modeOneShot) + ' · ' + (node.activity === 'running' ? STR.running : STR.ended))
+        : ((node.toolCalls || 0) + ' ' + STR.tools + (node.toolErrors ? ' · ' + node.toolErrors + ' ' + STR.errors : ''))
+      return h('div', { key: node.id },
+        h('div', {
+          className: 'sf-treeRow', 'data-active': active ? 'true' : undefined,
+          title: node.id,
+          onClick: () => selectNode({ ...node, parentId: node.parentId, mode: node.mode }),
+        },
+          h('span', { className: 'sf-treeIndent', style: { width: 14 * depth } }),
+          hasChildren && h('span', { className: 'sf-treeCaret' }, '▾'),
+          isLive && h('span', { className: 'sf-liveDot ' + (node.activity === 'running' ? 'running' : 'inactive') }),
+          h('span', { className: 'sf-treeLabel' }, String(label).slice(0, 40)),
+          h('span', { className: 'sf-treeMeta', style: { marginLeft: 'auto' } }, meta),
+        ),
+        hasChildren && node.children.map((c) => renderNode(c, depth + 1, isLive)),
+      )
+    }
+
+    const offlineChildren = offline && offline.focus ? offline.focus.children || [] : []
+    const hasOffline = offlineChildren.length > 0
+    const hasLive = liveState === 'ready' && live !== null && live.length > 0
+    const hasAny = hasOffline || hasLive
+
+    return h('div', { className: 'sf-view' },
+      h('div', { className: 'sf-viewHeader' },
+        h('button', { className: 'sf-btn', onClick: props.onBack }, '← ' + STR.back),
+        h('h2', { className: 'sf-viewTitle' }, STR.lineage),
+      ),
+      h('div', { className: 'sf-detailBody' },
+        // 左：血缘树
+        h('div', { className: 'sf-tree' },
+          h('div', { className: 'sf-groupTitle' }, STR.liveTree + (liveState === 'loading' ? '…' : '')),
+          !hasLive && liveState !== 'loading' && h('div', { className: 'sf-hint' }, STR.noLineage),
+          hasLive && live.map((n) => renderNode(n, 0, true)),
+          h('div', { className: 'sf-groupTitle', style: { marginTop: 10 } }, STR.offlineTree),
+          !hasOffline && h('div', { className: 'sf-hint' }, STR.noLineage),
+          hasOffline && offlineChildren.map((n) => renderNode(n, 0, false)),
+        ),
+        // 右：选中节点详情
+        h('div', { className: 'sf-treeDetail' },
+          selected === null && h('div', { className: 'sf-hint' }, STR.noDetail),
+          detail && detail.phase === 'loading' && h('div', { className: 'sf-hint' }, STR.loadDetail),
+          detail && detail.phase === 'empty' && h('div', { className: 'sf-hint' }, STR.noDetail),
+          detail && detail.phase === 'ready' && h('div', { className: 'sf-muted', style: { flex: 'none' } },
+            STR.subagentDetail + ' · ' + String(selected.label || selected.id).slice(0, 60) +
+            (detail.counts ? ' · ' + (detail.counts['tool/call'] || 0) + ' ' + STR.tools : ''),
+          ),
+          detail && detail.phase === 'ready' && h(TurnList, {
+            sessionId: selected.id,
+            lightTurns: detail.lightTurns || [],
+            collapsed,
+            toggle,
+            ensureTurn,
+            turnItems,
+          }),
+        ),
+      ),
+    )
+  }
+
+  // ── 详情页（M3 折叠时间线）─────────────────────────────────────────
+  // props: { session (总览卡片数据), workspace, sessions (runtime, 跳转用), onBack }
+  // 交互：信息流默认全部折叠（回合/消息/工具），右侧为用户发言大纲（点击展开回合并定位）。
+  function SessionFlowDetail(props) {
+    const { session } = props
+    const [state, setState] = useState({ phase: 'loading', error: null, data: null })
+    // 折叠状态：键集合，has(key) = 折叠。turn-N / tool-<callId> / msg-<seq>
+    const [collapsed, setCollapsed] = useState(() => new Set())
+    const collapsedInit = useRef(false)
+    // M8a：标题重命名（编辑态 + 保存后的显示覆盖，优先于 session.userTitle）。
+    const [renaming, setRenaming] = useState(false)
+    const [titleOverride, setTitleOverride] = useState(null)
+    // mux 近实时官方标题（SessionFlowView 订阅 session/projection(title) 帧传入）。
+    const liveTitleOf = (id) => (props.liveTitles && props.liveTitles[id]) || null
+    // 对齐官方：优先官方 session.rename RPC（log-backed，双向一致）；空标题/官方拒绝回退 legacy。
+    const saveRename = (title) => {
+      const conn = props.connection
+      const legacy = () => api('rename', { sessionId: session.id, title }).then((json) => {
+        if (json && json.ok) {
+          setTitleOverride(json.userTitle) // null = 清除恢复原名
+          setRenaming(false)
+          return true
+        }
+        throw new Error((json && json.error) || STR.renameFail)
+      })
+      const trimmed = String(title || '').trim()
+      if (trimmed === '' && session.titleSource === 'user') return Promise.reject(new Error(STR.renameClearBlocked))
+      if (trimmed !== '' && sfRemoteRef.current && sfRemoteRef.current.canRename) {
+        return sfRemoteRef.current.rename(session.id, trimmed)
+          .then((accepted) => { if (typeof accepted !== 'string') throw new Error(STR.renameFail); return accepted })
+          .then((accepted) => { setTitleOverride(accepted); setRenaming(false); return true })
+          .catch(() => legacy())
+      }
+      return legacy()
+    }
+
+    useEffect(() => {
+      // 空会话（新建后未对话）：不请求详情，直接显示占位提示。
+      const isEmpty = session.empty === true ||
+        (!(session.userMessages || 0) && !(session.toolCalls || 0) && !(session.turns || 0))
+      if (isEmpty) {
+        setState({ phase: 'empty', error: null, data: null })
+        return
+      }
+      let alive = true
+      api('get', { sessionId: session.id }).then((json) => {
+        if (!alive) return
+        if (json && json.ok) setState({ phase: 'ready', error: null, data: json })
+        else setState({ phase: 'error', error: (json && json.error) || 'get failed', data: null })
+      }).catch((e) => {
+        if (alive) setState({ phase: 'error', error: String(e), data: null })
+      })
+      return () => { alive = false }
+    }, [session.id])
+
+    // 默认折叠：所有回合折叠，只展示「用户发言 + 结论」摘要；展开才按需加载。
+    useEffect(() => {
+      if (state.phase !== 'ready' || collapsedInit.current) return
+      collapsedInit.current = true
+      const all = new Set()
+      for (const lt of state.data.lightTurns || []) all.add('turn-' + lt.turn)
+      setCollapsed(all)
+    }, [state.phase])
+
+    const toggle = (key) => {
+      setCollapsed((prev) => {
+        const next = new Set(prev)
+        if (next.has(key)) next.delete(key)
+        else next.add(key)
+        return next
+      })
+    }
+    // 当前选中回合（正文区/右侧区点击定位后高亮，便于知道正在看哪个回合）。
+    const [activeTurn, setActiveTurn] = useState(null)
+    const selectTurn = (turnNo) => setActiveTurn(turnNo)
+    const expandAll = () => {
+      // 全部展开：展开所有回合并逐个按需加载。
+      setCollapsed(new Set())
+      for (const lt of lightTurns) ensureTurn(lt.turn)
+    }
+    const collapseAll = () => {
+      const all = new Set()
+      for (const lt of lightTurns) all.add('turn-' + lt.turn)
+      // 已加载回合内的消息/思考/工具也折叠。
+      for (const full of turnItems.values()) {
+        for (const u of full.userMessages || []) all.add('msg-' + u.seq)
+        for (const a of full.assistantMessages || []) {
+          all.add('msg-' + a.seq)
+          if (a.hasThinking) all.add('think-' + a.seq)
+        }
+        for (const s of full.steps || []) {
+          for (const c of s.toolCalls) all.add('tool-' + c.callId)
+        }
+      }
+      setCollapsed(all)
+    }
+
+    const jumpNative = () => {
+      try {
+        props.sessions.open(session.id)
+        // 打开原生会话后收起会话流视图，交还中栏给对话界面。
+        props.onClose()
+      } catch (error) {
+        console.warn('[dsh-session-flow] cannot open session', session.id, error)
+      }
+    }
+
+    // 右侧大纲：点击用户发言 → 展开所在回合（按需加载）→ 滚动定位到「回合开头」。
+    const scrollToMsg = (turnNo, seq) => {
+      setActiveTurn(turnNo)
+      setCollapsed((prev) => {
+        const next = new Set(prev)
+        next.delete('turn-' + turnNo)
+        return next
+      })
+      ensureTurn(turnNo)
+      setTimeout(() => {
+        const turnEl = document.getElementById('sf-turn-' + turnNo)
+        if (turnEl) {
+          turnEl.scrollIntoView({ behavior: 'smooth', block: 'start' })
+          return
+        }
+        const el = document.getElementById('sf-msg-' + seq)
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      }, 80)
+    }
+
+    const data = state.data
+    // 轻量时间线：回合摘要（默认折叠，秒开）。
+    const lightTurns = (data && data.lightTurns) || []
+    // 会话内工具统计（来自 host 服务端聚合，避免前端全量扫描）。
+    const toolStats = (data && data.toolStats) || []
+    // 展开回合时的完整时间线按需加载。
+    const [turnItems, setTurnItems] = useState(() => new Map())
+    const loadingTurns = useRef(new Set())
+    const ensureTurn = async (turnNo) => {
+      if (turnItems.has(turnNo) || loadingTurns.current.has(turnNo)) return
+      loadingTurns.current.add(turnNo)
+      try {
+        const json = await api('getTurn', { sessionId: session.id, turn: turnNo })
+        if (json && json.ok && json.turn) {
+          setTurnItems((prev) => new Map(prev).set(turnNo, json.turn))
+        }
+      } catch (e) {
+        console.warn('[dsh-session-flow] getTurn failed', turnNo, e)
+      } finally {
+        loadingTurns.current.delete(turnNo)
+      }
+    }
+    // 统计条展开态与定位游标。
+    const [statsExpanded, setStatsExpanded] = useState(false)
+    const toolCursor = useRef(new Map())
+
+    // ── M6 实时通道：connection.api.sessions.history → host derive → 完整折叠视图 ──
+    // 与 M4 子代理桥同一数据源形态（events 数组）；轮询刷新仅实时模式激活时进行。
+    const [liveOn, setLiveOn] = useState(false)
+    const [liveState, setLiveState] = useState({ phase: 'idle', error: null, timeline: null, eventCount: 0, lastActive: null })
+    const liveTimer = useRef(null)
+    // 已见过的实时回合号：刷新时只折叠「新出现的回合」，已展开的回合保持用户状态
+    // （此前误把所有不在折叠集合中的回合加入集合 = 每次刷新全部收拢）。
+    const liveSeenTurns = useRef(new Set())
+    const fetchLive = useRef(async () => {})
+    fetchLive.current = async () => {
+      const conn = props.connection
+      if (conn === undefined || conn.api === undefined || conn.api.sessions === undefined) {
+        setLiveState((s) => ({ ...s, phase: 'error', error: STR.liveUnavailable }))
+        return
+      }
+      setLiveState((s) => ({ ...s, phase: 'loading' }))
+      try {
+        // v0.1.2：session RPC 经双面适配器（remote.session.page / 旧 history）。
+        const val = sfRemoteRef.current ? await sfRemoteRef.current.pageBySession(session.id, 400) : undefined
+        if (val === undefined) {
+          setLiveState((s) => ({ ...s, phase: 'error', error: STR.liveFail }))
+          return
+        }
+        const events = historyEventsOf(val)
+        const derived = await api('derive', { events, now: Date.now() })
+        if (!derived || !derived.ok) {
+          setLiveState((s) => ({ ...s, phase: 'error', error: (derived && derived.error) || STR.liveFail }))
+          return
+        }
+        const tl = (derived.timeline && derived.timeline.turns) || []
+        // 实时视图只保留「最近 N 个历史回合 + 当前运行回合」（若有），数量恒定，
+        // 不随 history 窗口大小变化——新回合出现时最旧的被挤出。N 可配置（设置页）。
+        const LIVE_MAX_HISTORY_TURNS = sfSettings.current.liveHistoryTurns
+        const liveRunning = derived.running === true
+        const keepCount = tl.length > LIVE_MAX_HISTORY_TURNS + (liveRunning ? 1 : 0)
+          ? LIVE_MAX_HISTORY_TURNS + (liveRunning ? 1 : 0)
+          : tl.length
+        const displayTl = keepCount > 0 ? tl.slice(-keepCount) : tl
+        setLiveState({
+          phase: 'ready',
+          error: null,
+          timeline: displayTl,
+          eventCount: events.length,
+          lastActive: derived.session && derived.session.lastEventTime != null ? derived.session.lastEventTime : null,
+          // 运行中 = 事件结构信号（未闭合回合/步骤/工具调用或流式中间态），
+          // 不依赖时间戳：输出间隔长（模型思考/长工具执行）时不会误判停止。
+          running: liveRunning,
+          // 卡死监控：host 分类（active/tool-wait/quiet/stalled/ended）。
+          health: derived.health || null,
+        })
+        // 只把「新出现的回合」并入折叠集合（默认折叠）；已展开的回合不被收拢。
+        const newTurns = displayTl.filter((t) => !liveSeenTurns.current.has(t.turn))
+        for (const t of displayTl) liveSeenTurns.current.add(t.turn)
+        if (newTurns.length > 0) {
+          setCollapsed((prev) => {
+            const next = new Set(prev)
+            for (const t of newTurns) next.add('turn-' + t.turn)
+            return next
+          })
+        }
+      } catch (e) {
+        setLiveState((s) => ({ ...s, phase: 'error', error: STR.liveFail + ': ' + String(e && e.message || e) }))
+      }
+    }
+    const enterLive = () => {
+      setLiveOn(true)
+      liveSeenTurns.current.clear() // 重进实时：全新视图，首轮全部折叠
+      tlFollowRef.current = true // T7：开播默认吸底
+      fetchLive.current()
+      if (liveTimer.current === null) {
+        liveTimer.current = setInterval(() => { fetchLive.current() }, sfSettings.current.livePollMs)
+      }
+    }
+    // T7 实时吸底跟随：用户在时间线底部（距底 ≤liveFollowPx）时，每次轮询刷新后平滑滚到
+    // 新底部；上滑读历史不跟随（onScroll 实时追踪）。阈值默认 40px（可在设置页调整）。
+    const tlScrollRef = useRef(null)
+    const tlFollowRef = useRef(true)
+    const onTlScroll = () => {
+      const el = tlScrollRef.current
+      if (el === null) return
+      tlFollowRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= sfSettings.current.liveFollowPx
+    }
+    useEffect(() => {
+      if (!liveOn || liveState.timeline === null) return
+      const el = tlScrollRef.current
+      if (el !== null && tlFollowRef.current) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+    }, [liveState.timeline, liveOn])
+    const exitLive = () => {
+      setLiveOn(false)
+      liveSeenTurns.current.clear()
+      setLiveState({ phase: 'idle', error: null, timeline: null, eventCount: 0, lastActive: null, running: false, health: null })
+      if (liveTimer.current !== null) { clearInterval(liveTimer.current); liveTimer.current = null }
+    }
+    useEffect(() => () => { if (liveTimer.current !== null) clearInterval(liveTimer.current) }, [])
+    // 右侧导航：标签（用户发言/工具/错误/检索）+ 工具展开态。
+    const [navTab, setNavTab] = useState(props.initialSearchQuery ? 'search' : 'users')
+    const [expandedTools, setExpandedTools] = useState(() => new Set())
+    const errorCalls = toolStats.flatMap((e) => e.errorCalls)
+    // 会话内检索（M5c 方案C）：检索词（总览自动带入）+ 匹配位置列表。
+    const [searchQuery, setSearchQuery] = useState(props.initialSearchQuery || '')
+    const [searchMatches, setSearchMatches] = useState(null) // null = 尚未检索
+    useEffect(() => {
+      const q = searchQuery.trim()
+      if (!q) { setSearchMatches(null); return }
+      let alive = true
+      api('searchIn', { sessionId: session.id, query: q }).then((json) => {
+        if (alive && json && json.ok) setSearchMatches(json.matches || [])
+      }).catch(() => {})
+      return () => { alive = false }
+    }, [searchQuery, session.id])
+
+    // 跳转到检索命中位置：展开回合（按需加载）→ 滚动定位 → 闪烁高亮。
+    const jumpToMatch = (m) => {
+      const turn = m.turn
+      setActiveTurn(turn)
+      setCollapsed((prev) => {
+        const next = new Set(prev)
+        next.delete('turn-' + turn)
+        return next
+      })
+      ensureTurn(turn)
+      setTimeout(() => {
+        let el = null
+        if (m.callId) el = document.getElementById('sf-tc-' + m.callId)
+        else if (m.seq !== undefined) el = document.getElementById('sf-msg-' + m.seq)
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+          el.classList.add('sf-flash')
+          setTimeout(() => el.classList.remove('sf-flash'), 1600)
+        }
+      }, 120)
+    }
+
+    // ── M7 遗留 L1：跨视图 inspect 握手 ──────────────────────────────
+    // chat 视图工具调用行「Inspect」按钮写入共享 store（{callId}），会话流标签
+    // 作为 conversation.view 占用者收到 owner props：inspect/onInspectDone。
+    // 消费：toolStats 里定位该 callId 所属回合 → 展开回合（按需加载）→ 滚动定位
+    // → 闪烁高亮 → onInspectDone() 清除（参照 ui-trajectory 的 inspect 消费方式）。
+    // 时序处理：inspect 可能在数据未就绪时到达（依赖 phase 重跑）；liveOn/血缘视图
+    // 时先退出再定位；同一 callId 只处理一次（inspectHandled ref，store 清除后重置）。
+    const inspectHandled = useRef(null)
+    const jumpToCall = (turn, callId) => {
+      setActiveTurn(turn)
+      setCollapsed((prev) => {
+        const next = new Set(prev)
+        next.delete('turn-' + turn)
+        return next
+      })
+      ensureTurn(turn)
+      setTimeout(() => {
+        const el = document.getElementById('sf-tc-' + callId)
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+          el.classList.add('sf-flash')
+          setTimeout(() => el.classList.remove('sf-flash'), 1600)
+        }
+      }, 120)
+    }
+    const applyInspect = (callId) => {
+      if (!callId) return
+      let turn = null
+      for (const t of toolStats) {
+        const c = (t.calls || []).find((x) => x.callId === callId)
+        if (c) { turn = c.turn; break }
+      }
+      if (turn === null) {
+        // toolStats 未命中（理论上不应发生）：searchIn 按 callId 全文兜底。
+        api('searchIn', { sessionId: session.id, query: callId }).then((json) => {
+          const m = json && json.ok ? (json.matches || []).find((x) => x.callId === callId) : null
+          if (m && typeof m.turn === 'number') jumpToCall(m.turn, callId)
+          if (props.onInspectDone) props.onInspectDone()
+        }).catch(() => { if (props.onInspectDone) props.onInspectDone() })
+        return
+      }
+      jumpToCall(turn, callId)
+      if (props.onInspectDone) props.onInspectDone()
+    }
+    useEffect(() => {
+      // store 清除（inspect → null）后重置防重标记，允许同一 callId 再次检视。
+      if (!props.inspect || !props.inspect.callId) { inspectHandled.current = null; return }
+      if (state.phase !== 'ready') return
+      if (inspectHandled.current === props.inspect.callId) return
+      inspectHandled.current = props.inspect.callId
+      if (liveOn) exitLive()
+      if (view === 'lineage') setView('timeline')
+      applyInspect(props.inspect.callId)
+    }, [props.inspect, state.phase])
+
+    // 定位工具/错误调用：展开所在回合（按需加载）→ 滚动到调用行；同一种再次点击循环。
+    const locateCall = (list, cursorKey) => {
+      if (!list || list.length === 0) return
+      const idx = (toolCursor.current.get(cursorKey) || 0) % list.length
+      toolCursor.current.set(cursorKey, idx + 1)
+      const { callId, turn } = list[idx]
+      setActiveTurn(turn)
+      setCollapsed((prev) => {
+        const next = new Set(prev)
+        next.delete('turn-' + turn)
+        return next
+      })
+      ensureTurn(turn)
+      setTimeout(() => {
+        const el = document.getElementById('sf-tc-' + callId)
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      }, 80)
+    }
+    const jumpToTool = (name) => {
+      const e = toolStats.find((x) => x.name === name)
+      if (e) locateCall(e.calls, 'tool:' + name)
+    }
+    const jumpToError = () => {
+      const errs = toolStats.flatMap((e) => e.errorCalls)
+      locateCall(errs, 'error')
+    }
+
+    // 用户发言大纲（以用户发言为导航节点，来自 light 摘要）。
+    const userTurns = []
+    for (const lt of lightTurns) {
+      for (const u of lt.userMessages || []) userTurns.push({ turn: lt.turn, seq: u.seq, preview: u.preview })
+    }
+    const sessionInfo = data ? data.session : session
+    const running = sessionInfo.lastEventTime !== null && sessionInfo.lastEventTime !== undefined &&
+      (Date.now() - sessionInfo.lastEventTime) < ACTIVE_WINDOW_MS
+    // 视图切换：时间线详情 ⇄ 血缘树。pendingSelect：工具行「查看子代理」直达选中。
+    const [view, setView] = useState('timeline')
+    const [pendingSelect, setPendingSelect] = useState(null)
+    // M5 摘要：规则摘要前端实时组装；LLM 摘要走 host summarize（索引缓存）。
+    const [llmSummary, setLlmSummary] = useState(null)
+    const [llmStale, setLlmStale] = useState(false)
+    const [llmBusy, setLlmBusy] = useState(false)
+    const [llmErr, setLlmErr] = useState('')
+    useEffect(() => {
+      // get 响应里带索引中已缓存的 LLM 摘要 + 过期标记（生成后有新对话）。
+      if (state.phase === 'ready' && data) {
+        if (data.summary) setLlmSummary(data.summary)
+        setLlmStale(data.summaryStale === true)
+      }
+    }, [state.phase])
+    const genLlmSummary = () => {
+      setLlmBusy(true)
+      setLlmErr('')
+      api('summarize', { sessionId: session.id, mode: 'llm' }).then((json) => {
+        if (json && json.ok) { setLlmSummary(json.summary); setLlmStale(false) }
+        else setLlmErr(STR.llmFail + ': ' + ((json && json.error) || 'unknown'))
+      }).catch((e) => setLlmErr(STR.llmFail + ': ' + String(e))).finally(() => setLlmBusy(false))
+    }
+    // M5d 导出：host 生成分卷 Markdown 并打包 ZIP（base64）→ Blob 下载。
+    // 超大会话拆为「概览 + 时间线分卷」，避免单文件过大导致打不开。
+    const [exporting, setExporting] = useState(false)
+    const exportSessionMd = () => {
+      if (exporting) return
+      setExporting(true)
+      api('exportMd', { sessionId: session.id }).then((json) => {
+        if (!json || !json.ok) { alert(STR.exportFail + ': ' + ((json && json.error) || 'unknown')); return }
+        // base64 → Uint8Array → Blob（application/zip）。
+        const bin = atob(json.base64)
+        const bytes = new Uint8Array(bin.length)
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+        const blob = new Blob([bytes], { type: 'application/zip' })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = json.filename || ('session-' + session.id + '.zip')
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        setTimeout(() => URL.revokeObjectURL(url), 10000)
+      }).catch((e) => alert(STR.exportFail + ': ' + String(e))).finally(() => setExporting(false))
+    }
+    // 规则摘要（零请求，从 get 响应组装）：任务数 = 含用户消息的回合数；
+    // 「首个任务」= 第一个回合的用户消息；「最近结论」= 最后一个有结论的回合。
+    const ruleTaskCount = lightTurns.filter((lt) => lt.userMessages && lt.userMessages.length > 0).length
+    const ruleGoal = (() => {
+      for (const lt of lightTurns) {
+        if (lt.userMessages && lt.userMessages.length > 0) return String(lt.userMessages[0].preview).slice(0, 150)
+      }
+      return ''
+    })()
+    const ruleConclusion = (() => {
+      for (let i = lightTurns.length - 1; i >= 0; i--) {
+        if (lightTurns[i].conclusionPreview) return String(lightTurns[i].conclusionPreview).slice(0, 220)
+      }
+      return ''
+    })()
+    const ruleTools = toolStats.slice(0, 6).map((t) => t.name + '·' + t.count).join('  ')
+
+    if (view === 'lineage') {
+      return h(LineageView, {
+        sessionId: session.id,
+        connection: props.connection,
+        initialSelectId: pendingSelect,
+        onBack: () => setView('timeline'),
+      })
+    }
+
+    const openSubagent = (childId) => {
+      setPendingSelect(childId)
+      setView('lineage')
+    }
+
+    return h('div', { className: 'sf-view' },
+      h('div', { className: 'sf-viewHeader' },
+        h('button', { className: 'sf-btn', onClick: props.onBack }, '← ' + (props.backLabel || STR.back)),
+        h('h2', { className: 'sf-viewTitle', style: { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis' } },
+          renaming
+            ? h(RenameInline, {
+                initial: titleOverride || liveTitleOf(session.id) || session.userTitle || session.title || '',
+                onSave: saveRename,
+                onCancel: () => setRenaming(false),
+              })
+            : h('span', { style: { display: 'inline-flex', alignItems: 'center', minWidth: 0 } },
+                h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: (titleOverride || liveTitleOf(session.id) || session.userTitle) ? session.title || STR.unknownTitle : undefined },
+                  titleOverride || liveTitleOf(session.id) || session.userTitle || session.title || STR.unknownTitle),
+                h('button', {
+                  className: 'sf-renameBtn', title: STR.rename,
+                  onClick: () => setRenaming(true),
+                }, '✎'),
+              ),
+        ),
+        running ? h('span', { className: 'sf-badge sf-badgeRun' }, STR.running) : h('span', { className: 'sf-badge sf-badgeEnd' }, STR.ended),
+        session.delegationDepth > 0 && h('span', { className: 'sf-badge sf-badgeSub' }, STR.subagent),
+        h('button', { className: 'sf-btn', onClick: () => { setPendingSelect(null); setView('lineage') } }, STR.lineage),
+        // T6：并入右栏（工作台详情页 + 嵌入标签页都显示）。嵌入模式点击后额外
+        // 自动切回「对话」标签——右栏已接管会话流展示，中栏标签页继续停留会造成
+        // 双视图冗余（用户指定交互：点击=打开 dock+跳回对话）。
+        h('button', {
+          className: 'sf-btn',
+          onClick: () => {
+            if (dockBridge.controller) dockBridge.controller.open()
+            if (props.embedded) activateChatTab()
+          },
+          title: STR.dockHint,
+        }, STR.dock),
+        // M6 实时通道：进行中会话可实时查看（sessions.history → derive → 折叠视图）。
+        props.connection !== undefined && h('button', {
+          className: 'sf-btn' + (liveOn ? ' sf-btnActive' : ''),
+          onClick: liveOn ? exitLive : enterLive,
+          disabled: liveOn && liveState.phase === 'loading',
+        }, liveOn ? STR.liveActive + ' ✕' : STR.live),
+        h('button', { className: 'sf-btn', onClick: exportSessionMd, disabled: exporting }, exporting ? STR.exporting : STR.exportMd),
+        // 嵌入原生会话页模式：无「跳转原生会话」（本页即原生会话页）。
+        !props.embedded && h('button', { className: 'sf-btn', onClick: jumpNative }, STR.jumpNative),
+        h('button', { className: 'sf-btn', onClick: expandAll }, STR.expandAll),
+        h('button', { className: 'sf-btn', onClick: collapseAll }, STR.collapseAll),
+      ),
+      state.phase === 'loading' && h('div', { className: 'sf-hint' }, STR.detailLoading),
+      state.phase === 'error' && h('div', { className: 'sf-hint', style: { color: '#d43b3b' } }, STR.detailFailed + ': ' + String(state.error)),
+      state.phase === 'empty' && h('div', { className: 'sf-hint' }, STR.emptyHint),
+      state.phase === 'ready' && h('div', { className: 'sf-detailBody' },
+        // 左侧时间线（T7：ref+onScroll 供实时吸底跟随）
+        h('div', { className: 'sf-timeline', ref: tlScrollRef, onScroll: onTlScroll },
+          h('div', { className: 'sf-muted', style: { flex: 'none' }, title: data.workspaceCwd || data.workspace },
+            (data.workspaceLabel || data.workspace || '') + ' · ' + fmtTime(sessionInfo.createdAt) +
+            ' · ' + STR.duration + ' ' + fmtDuration((sessionInfo.lastEventTime || 0) - (sessionInfo.createdAt || 0)) +
+            ' · ' + (sessionInfo.recordCount || 0) + ' ' + STR.records,
+          ),
+          // 详情页统计条：本会话工具分布概览，可展开；点击联动右侧导航对应标签。
+          toolStats.length > 0 && h('div', { className: 'sf-statsBar', style: { flex: 'none' } },
+            h('span', { className: 'sf-statsLabel' }, STR.toolTop),
+            (statsExpanded ? toolStats : toolStats.slice(0, 5)).map((t) =>
+              h('button', {
+                key: t.name, className: 'sf-statChip clickable',
+                title: t.name + ' · ' + t.count + ' 次' + (t.errors > 0 ? ' · ' + t.errors + ' 错误' : ''),
+                onClick: () => { setNavTab('tools'); setExpandedTools((prev) => new Set(prev).add(t.name)) },
+              },
+                h('span', {}, t.name),
+                h('span', { className: 'sf-statCount' + (t.errors > 0 ? ' err' : '') }, t.count),
+              )),
+            toolStats.length > 5 && h('button', {
+              className: 'sf-statChip clickable',
+              onClick: () => setStatsExpanded(!statsExpanded),
+            }, statsExpanded ? STR.collapsed : STR.expanded + ' (' + toolStats.length + ')'),
+            sessionInfo.toolErrors > 0 && h('button', {
+              className: 'sf-statChip clickable', title: STR.issuesHint,
+              onClick: () => setNavTab('errors'),
+            },
+              h('span', {}, '⚠ ' + STR.errors),
+              h('span', { className: 'sf-statCount err' }, sessionInfo.toolErrors),
+            ),
+          ),
+          // M5 会话摘要卡：规则摘要实时组装 + LLM 摘要（DSH 模型通道，索引缓存）。
+          (ruleGoal || ruleConclusion || ruleTools) && h('div', { className: 'sf-summaryCard' },
+            h('div', { className: 'sf-summaryHead' },
+              h('span', { className: 'sf-summaryTitle' }, STR.summary),
+              h('span', { className: 'sf-badge sf-badgeEnd' }, STR.summaryRuleTag),
+            ),
+            ruleTaskCount > 0 && h('div', { className: 'sf-summaryRow' },
+              h('span', { className: 'sf-turnSummaryTag' }, STR.summaryTaskCount),
+              h('span', { className: 'sf-turnSummaryText' }, ruleTaskCount),
+            ),
+            ruleGoal && h('div', { className: 'sf-summaryRow' },
+              h('span', { className: 'sf-turnSummaryTag user' }, STR.summaryGoal),
+              h('span', { className: 'sf-turnSummaryText' }, ruleGoal),
+            ),
+            ruleConclusion && h('div', { className: 'sf-summaryRow' },
+              h('span', { className: 'sf-turnSummaryTag ok' }, STR.summaryConclusion + (running ? STR.summaryProvisional : '')),
+              h('span', { className: 'sf-turnSummaryText' }, ruleConclusion),
+            ),
+            ruleTools && h('div', { className: 'sf-summaryRow' },
+              h('span', { className: 'sf-turnSummaryTag' }, STR.summaryTools),
+              h('span', { className: 'sf-turnSummaryText' }, ruleTools),
+            ),
+            llmSummary && h('div', { className: 'sf-summaryRow', style: { marginTop: 4, alignItems: 'flex-start' } },
+              h('span', { className: 'sf-turnSummaryTag', style: { background: 'rgba(140,110,255,.14)', color: '#8b5cf6' } }, STR.summaryLlmTag),
+              // LLM 摘要完整显示（不 clamp），支持迷你 Markdown（粗体/斜体/代码/列表/标题）。
+              h('div', { className: 'sf-summaryFull' }, renderSummaryMd(llmSummary) || llmSummary),
+            ),
+            llmSummary && llmStale && h('div', {
+              className: 'sf-summaryStale',
+              onClick: genLlmSummary,
+              title: STR.llmSummary,
+            }, STR.summaryStale),
+            llmErr && h('div', { className: 'sf-muted', style: { color: '#d43b3b' } }, llmErr),
+            h('button', {
+              className: 'sf-btn', style: { alignSelf: 'flex-start', marginTop: 6 },
+              onClick: genLlmSummary, disabled: llmBusy,
+            }, llmBusy ? STR.llmGenerating : (llmSummary ? STR.llmSummary + ' ↻' : STR.llmSummary)),
+          ),
+          // M6 实时模式：sessions.history → derive 的完整折叠时间线（轮询刷新）。
+          liveOn && h('div', { className: 'sf-liveBar', style: { flex: 'none' } },
+            h('span', { className: 'sf-badge sf-badgeRun', style: { flex: 'none' } }, STR.liveActive),
+            healthBadge(liveState.health),
+            h('span', { className: 'sf-liveText' },
+              h('span', { className: 'sf-muted', style: { flex: 'none' } }, (liveState.eventCount || 0) + ' ' + STR.liveEvents),
+              liveState.lastActive && h('span', { className: 'sf-muted', style: { flex: 'none' } }, STR.liveLastActive + ' ' + fmtTime(liveState.lastActive)),
+              liveState.phase === 'loading' && h('span', { className: 'sf-muted', style: { flex: 'none' } }, STR.liveRefreshing),
+            ),
+            h('button', { className: 'sf-btn sf-liveExitBtn', onClick: exitLive }, STR.liveExit),
+          ),
+        liveOn && liveState.phase === 'error' && h('div', { className: 'sf-hint', style: { color: '#d43b3b' } }, liveState.error),
+          liveOn && liveState.phase === 'loading' && liveState.timeline === null && h('div', { className: 'sf-hint' }, STR.liveLoading),
+          liveOn && liveState.timeline !== null && h(TimelineTurns, {
+            // 保留回合头（默认折叠可点击展开）：hideHead=true 时折叠回合既无内容
+            // 也无展开入口，实时时间线会整片空白。
+            // liveActive：事件结构信号判定运行中（未闭合回合/步骤/工具或流式中间态），
+            // 与输出节奏无关——思考/长工具执行期间保持高亮，会话结束立即熄灭。
+            turns: liveState.timeline, collapsed, toggle, onOpenSubagent: openSubagent,
+            liveActive: liveState.running === true,
+            activeTurn, setActiveTurn,
+          }),
+          !liveOn && lightTurns.length === 0 && h('div', { className: 'sf-hint' }, STR.noTimeline),
+          !liveOn && h(TurnList, { sessionId: session.id, lightTurns, collapsed, toggle, ensureTurn, turnItems, onOpenSubagent: openSubagent, activeTurn, onSelectTurn: selectTurn }),
+        ),
+        // 右侧：四标签导航（用户发言 / 工具 / 错误 / 检索），点击条目定位到时间线对应位置。
+        h('div', { className: 'sf-artifacts' },
+          h('div', { className: 'sf-navTabs', style: { flex: 'none' } },
+            h('button', { className: 'sf-navTab' + (navTab === 'users' ? ' active' : ''), title: STR.userNav, onClick: () => setNavTab('users') },
+              h('span', { className: 'sf-navIcon', dangerouslySetInnerHTML: { __html: NAV_ICON_USER } }),
+              h('span', { className: 'sf-navTabCount' }, userTurns.length)),
+            h('button', { className: 'sf-navTab' + (navTab === 'tools' ? ' active' : ''), title: STR.tools, onClick: () => setNavTab('tools') },
+              h('span', { className: 'sf-navIcon', dangerouslySetInnerHTML: { __html: NAV_ICON_TOOL } }),
+              h('span', { className: 'sf-navTabCount' }, toolStats.length)),
+            h('button', { className: 'sf-navTab' + (navTab === 'errors' ? ' active' : ''), title: STR.errors, onClick: () => setNavTab('errors') },
+              h('span', { className: 'sf-navIcon', dangerouslySetInnerHTML: { __html: NAV_ICON_ERR } }),
+              h('span', { className: 'sf-navTabCount err' }, errorCalls.length)),
+            h('button', { className: 'sf-navTab' + (navTab === 'search' ? ' active' : ''), title: STR.searchTab, onClick: () => setNavTab('search') },
+              h('span', { className: 'sf-navIcon', dangerouslySetInnerHTML: { __html: NAV_ICON_SEARCH } }),
+              h('span', { className: 'sf-navTabCount' + (searchMatches && searchMatches.length > 0 ? ' err' : '') }, searchMatches ? searchMatches.length : 0)),
+          ),
+          navTab === 'search' && h('div', { className: 'sf-navBody' },
+            h('input', {
+              className: 'sf-input', style: { flex: 'none', width: 'calc(100% - 4px)', boxSizing: 'border-box', marginBottom: 6 },
+              placeholder: STR.searchInPlaceholder, value: searchQuery,
+              onChange: (e) => setSearchQuery(e.target.value),
+            }),
+            searchMatches !== null && h('div', { className: 'sf-hint', style: { flex: 'none' } },
+              STR.matches + ' ' + searchMatches.length),
+            searchMatches !== null && searchMatches.length === 0 && h('div', { className: 'sf-hint' }, STR.noMatches),
+            (searchMatches || []).map((m, i) => {
+              const kindLabel = m.kind === 'tool' || m.kind === 'error' ? m.name
+                : m.kind === 'user' ? STR.user
+                  : m.kind === 'thinking' ? STR.thinking : STR.assistant
+              return h('div', {
+                key: (m.callId || 's' + m.seq), className: 'sf-navItem' + (activeTurn === m.turn ? ' sf-navItemSel' : ''),
+                title: 'T' + m.turn + ' · ' + kindLabel,
+                onClick: () => jumpToMatch(m),
+              },
+                h('span', { className: 'sf-navIndex', style: m.kind === 'error' ? { color: '#d43b3b' } : undefined }, '#' + (i + 1)),
+                h('span', { className: 'sf-navKind ' + m.kind }, kindLabel),
+                h('span', { className: 'sf-navText' }, m.preview || ''),
+                h('span', { className: 'sf-navTurn' }, 'T' + m.turn),
+              )
+            }),
+          ),
+          navTab === 'users' && h('div', { className: 'sf-navBody' },
+            userTurns.length === 0 && h('div', { className: 'sf-hint' }, STR.noUserNav),
+            userTurns.map((u, i) =>
+              h('div', {
+                key: u.seq, className: 'sf-navItem' + (activeTurn === u.turn ? ' sf-navItemSel' : ''), title: STR.turns + ' ' + u.turn,
+                onClick: () => scrollToMsg(u.turn, u.seq),
+              },
+                h('span', { className: 'sf-navIndex' }, '#' + (i + 1)),
+                h('span', { className: 'sf-navText' }, u.preview),
+                h('span', { className: 'sf-navTurn' }, 'T' + u.turn),
+              ),
+            ),
+          ),
+          navTab === 'tools' && h('div', { className: 'sf-navBody' },
+            toolStats.length === 0 && h('div', { className: 'sf-hint' }, STR.noTimeline),
+            toolStats.map((t) => {
+              const open = expandedTools.has(t.name)
+              return h('div', { key: t.name, className: 'sf-navToolGroup' },
+                h('div', {
+                  className: 'sf-navToolHead', title: t.name + ' · ' + t.count + ' 次',
+                  onClick: () => setExpandedTools((prev) => {
+                    const next = new Set(prev)
+                    if (next.has(t.name)) next.delete(t.name)
+                    else next.add(t.name)
+                    return next
+                  }),
+                },
+                  h('span', { className: 'sf-treeCaret' }, open ? '▾' : '▸'),
+                  h('span', { className: 'sf-navToolName' }, t.name),
+                  h('span', { className: 'sf-navTurn' }, t.count + ' ' + STR.tools),
+                  t.errors > 0 && h('span', { className: 'sf-badge sf-badgeErr' }, t.errors),
+                ),
+                open && t.calls.map((c, i) =>
+                  h('div', {
+                    key: c.callId, className: 'sf-navItem' + (activeTurn === c.turn ? ' sf-navItemSel' : ''),
+                    title: 'T' + c.turn + ' · ' + t.name,
+                    onClick: () => locateCall([c], 'toolcall:' + c.callId),
+                  },
+                    h('span', { className: 'sf-navIndex' }, '#' + (i + 1)),
+                    h('span', { className: 'sf-navText' }, c.preview || '（无参数）'),
+                    h('span', { className: 'sf-navTurn' }, 'T' + c.turn),
+                  ),
+                ),
+              )
+            }),
+          ),
+          navTab === 'errors' && h('div', { className: 'sf-navBody' },
+            errorCalls.length === 0 && h('div', { className: 'sf-hint' }, STR.noDetail),
+            errorCalls.map((c, i) =>
+              h('div', {
+                key: c.callId, className: 'sf-navItem' + (activeTurn === c.turn ? ' sf-navItemSel' : ''), style: { borderColor: 'rgba(230,80,80,.35)' },
+                title: 'T' + c.turn + ' · 错误调用',
+                onClick: () => locateCall([c], 'err:' + c.callId),
+              },
+                h('span', { className: 'sf-navIndex', style: { color: '#d43b3b' } }, '#' + (i + 1)),
+                h('span', { className: 'sf-navText' }, c.preview || '（无参数）'),
+                h('span', { className: 'sf-navTurn' }, 'T' + c.turn),
+              ),
+            ),
+          ),
+        ),
+      ),
+    )
+  }
+
+  // ── 二期：嵌入原生会话页（conversation.view 槽位标签页）────────────
+  // 槽位环为会话作用域：每个原生会话页内一个「会话流」标签页，框架按
+  // key={sessionId} 重挂载，天然跟随当前会话切换。组件收到的框架标准
+  // props：sessionId + useSession（会话快照）；数据源与一期详情页一致
+  // （host get/getTurn/searchIn/summarize/exportMd/lineage + 实时通道）。
+  // 先取 host get 的轻量元信息（标题/计数，用于详情页空会话判定），
+  // 再复用 SessionFlowDetail 完整详情视图（摘要/统计/折叠时间线/四标签导航）。
+  // 嵌入模式差异：返回按钮 →「打开完整工作台」（唤起侧边栏工作台）；
+  // 隐藏「跳转原生会话」（本页即原生会话页）；onClose 无操作。
+  function SessionFlowTab(props) {
+    const { sessionId } = props
+    const [meta, setMeta] = useState(null) // {id, title, userMessages, toolCalls, turns}
+    const [loadErr, setLoadErr] = useState('')
+    // M7 遗留 L2：档案未命中（会话尚未落盘）时进入实时兜底视图，而非纯报错。
+    const [liveFallback, setLiveFallback] = useState(false)
+    const [retryKey, setRetryKey] = useState(0) // 「重试档案视图」触发重新 get
+    // 方向 A：全文检索命中跳转——读取 pendingSearch 桥（总览命中点击写入），
+    // 匹配当前会话则把检索词带入详情页（initialSearchQuery → 自动执行会话内 searchIn）。
+    const [pendingQuery, setPendingQuery] = useState('')
+    useEffect(() => {
+      if (!sessionId) return
+      try {
+        const raw = localStorage.getItem(PENDING_SEARCH_KEY)
+        if (!raw) return
+        const p = JSON.parse(raw)
+        if (p && p.sessionId === sessionId && p.query) {
+          localStorage.removeItem(PENDING_SEARCH_KEY)
+          setPendingQuery(p.query)
+        }
+      } catch (e) {}
+    }, [sessionId])
+
+    useEffect(() => {
+      let alive = true
+      setMeta(null)
+      setLoadErr('')
+      setLiveFallback(false)
+      if (!sessionId) return undefined
+      const conn = props.connection
+      const canLive = conn !== undefined && conn.api !== undefined && conn.api.sessions !== undefined
+      const toFallback = () => { if (alive && canLive) setLiveFallback(true) }
+      api('get', { sessionId }).then((json) => {
+        if (!alive) return
+        if (json && json.ok) {
+          const counts = json.counts || {}
+          const t = json.title
+          setMeta({
+            id: sessionId,
+            // entry.parsed.title 是 {title, source} 对象（已知陷阱），取 .title。
+            title: t && typeof t === 'object' ? String(t.title || '') : String(t || ''),
+            // M8a：自定义标题覆盖显示（userTitle || title）。
+            userTitle: json.userTitle || null,
+            userMessages: counts['user/message'] || 0,
+            toolCalls: counts['tool/call'] || 0,
+            turns: counts['turn/start'] || 0,
+          })
+        } else {
+          if (canLive) setLiveFallback(true)
+          else setLoadErr((json && json.error) || STR.detailFailed)
+        }
+      }).catch((e) => {
+        if (!alive) return
+        if (canLive) setLiveFallback(true)
+        else setLoadErr(String(e && e.message || e))
+      })
+      return () => { alive = false }
+    }, [sessionId, retryKey])
+
+    if (liveFallback) {
+      return h(SessionFlowLiveFallback, {
+        sessionId,
+        connection: props.connection,
+        onRetry: () => setRetryKey((k) => k + 1),
+      })
+    }
+    if (loadErr) {
+      return h('div', { className: 'sf-view' },
+        h('div', { className: 'sf-hint', style: { color: '#d43b3b' } }, STR.detailFailed + ': ' + loadErr))
+    }
+    if (meta === null) {
+      return h('div', { className: 'sf-view' }, h('div', { className: 'sf-hint' }, STR.detailLoading))
+    }
+    return h(SessionFlowDetail, {
+      session: meta,
+      sessions: props.sessions,
+      connection: props.connection,
+      onBack: props.onOpenWorkbench,
+      backLabel: STR.openWorkbench,
+      embedded: true,
+      onClose: () => {},
+      initialSearchQuery: pendingQuery,
+      // M7 遗留 L1：透传跨视图 inspect 握手（chat Inspect 按钮 → 会话流定位）。
+      inspect: props.inspect,
+      onInspectDone: props.onInspectDone,
+    })
+  }
+
+  // ── M7 遗留 L2：会话未落盘时的实时兜底视图 ────────────────────────
+  // 档案通道未命中（host get 404）时，用实时通道（sessions.history → derive）
+  // 渲染折叠时间线 + 3s 轮询，并保留「重试档案视图」入口。逻辑与 SessionFlowDetail
+  // 内实时通道同构（结构信号运行判定 / 只折叠新回合 / 不传 hideHead），自包含实现。
+  function SessionFlowLiveFallback(props) {
+    const { sessionId, connection } = props
+    const [state, setState] = useState({ phase: 'loading', error: null, timeline: null, eventCount: 0, running: false, health: null })
+    const [collapsed, setCollapsed] = useState(() => new Set())
+    const [activeTurn, setActiveTurn] = useState(null)
+    const liveSeenTurns = useRef(new Set())
+    const timer = useRef(null)
+
+    const fetchLive = useRef(async () => {})
+    fetchLive.current = async () => {
+      if (!sfRemoteRef.current) {
+        setState((s) => ({ ...s, phase: 'error', error: STR.liveUnavailable }))
+        return
+      }
+      setState((s) => ({ ...s, phase: s.timeline === null ? 'loading' : 'ready' }))
+      try {
+        const val = await sfRemoteRef.current.pageBySession(sessionId, 400)
+        if (val === undefined) {
+          setState((s) => ({ ...s, phase: 'error', error: STR.liveFail }))
+          return
+        }
+        const events = historyEventsOf(val)
+        const derived = await api('derive', { events, now: Date.now() })
+        if (!derived || !derived.ok) {
+          setState((s) => ({ ...s, phase: 'error', error: (derived && derived.error) || STR.liveFail }))
+          return
+        }
+        const tl = (derived.timeline && derived.timeline.turns) || []
+        setState({
+          phase: 'ready', error: null, timeline: tl, eventCount: events.length,
+          running: derived.running === true,
+          health: derived.health || null,
+        })
+        // 只折叠新出现的回合（默认折叠），已展开的保持用户状态（M6 经验）。
+        const newTurns = tl.filter((t) => !liveSeenTurns.current.has(t.turn))
+        for (const t of tl) liveSeenTurns.current.add(t.turn)
+        if (newTurns.length > 0) {
+          setCollapsed((prev) => {
+            const next = new Set(prev)
+            for (const t of newTurns) next.add('turn-' + t.turn)
+            return next
+          })
+        }
+      } catch (e) {
+        setState((s) => ({ ...s, phase: 'error', error: STR.liveFail + ': ' + String(e && e.message || e) }))
+      }
+    }
+
+    useEffect(() => {
+      liveSeenTurns.current.clear()
+      fetchLive.current()
+      if (timer.current === null) timer.current = setInterval(() => { fetchLive.current() }, sfSettings.current.livePollMs)
+      return () => { if (timer.current !== null) { clearInterval(timer.current); timer.current = null } }
+    }, [sessionId])
+
+    const toggle = (key) => {
+      setCollapsed((prev) => {
+        const next = new Set(prev)
+        if (next.has(key)) next.delete(key)
+        else next.add(key)
+        return next
+      })
+    }
+
+    return h('div', { className: 'sf-view' },
+      h('div', { className: 'sf-viewHeader' },
+        h('span', { className: 'sf-badge sf-badgeRun', style: { flex: 'none' } }, STR.liveActive),
+        healthBadge(state.health),
+        h('span', { className: 'sf-liveText' }, STR.liveFallbackHint),
+        h('button', { className: 'sf-btn sf-liveExitBtn', onClick: props.onRetry }, STR.retryArchive),
+      ),
+      state.phase === 'loading' && h('div', { className: 'sf-hint' }, STR.liveLoading),
+      state.phase === 'error' && h('div', { className: 'sf-hint', style: { color: '#d43b3b' } }, state.error),
+      state.phase === 'ready' && state.timeline !== null && state.timeline.length === 0 && h('div', { className: 'sf-hint' }, STR.noTimeline),
+      state.phase === 'ready' && state.timeline !== null && state.timeline.length > 0 && h(TimelineTurns, {
+        // 不传 hideHead：折叠回合需保留展开入口（M6 经验）。
+        turns: state.timeline, collapsed, toggle,
+        liveActive: state.running === true,
+        activeTurn, setActiveTurn,
+      }),
+    )
+  }
+
+  // ── 主视图（总览 ⇄ 详情）───────────────────────────────────────────
+  function SessionFlowView(props) {
+    const [detail, setDetail] = useState(null) // { session, searchQuery }
+    // 头部芯片直达意图（workbenchBridge）：收到会话 id → 总览数据就绪后自动进详情。
+    const [intentId, setIntentId] = useState(workbenchBridge.intent)
+    useEffect(() => workbenchBridge.subscribe((sid) => { setDetail(null); setIntentId(sid) }), [])
+    // ── 官方标题近实时同步（rename 对齐增强）──────────────────────────
+    // 自建 mux 下行流监听 session/projection(title) 帧：官方 rename / 自动标题生成后
+    // host 向每个 mux 消费者即时广播（value 为标题字符串），秒级同步、免等重扫。
+    const [liveTitles, setLiveTitles] = useState({}) // sessionId -> 最新官方标题
+    useEffect(() => {
+      const conn = props.connection
+      if (conn === undefined || conn.api === undefined || conn.api.events === undefined || typeof conn.api.events.mux !== 'function') return undefined
+      const ac = new AbortController()
+      ;(async () => {
+        try {
+          for await (const envelope of conn.api.events.mux({}, ac.signal)) {
+            const f = (envelope && envelope.payload) || envelope
+            if (!f || f.type !== 'session/projection' || f.key !== 'title') continue
+            const title = typeof f.value === 'string' ? f.value : (f.value && typeof f.value.title === 'string' ? f.value.title : '')
+            if (f.sessionId && title !== '') {
+              const sid = f.sessionId
+              setLiveTitles((prev) => (prev[sid] === title ? prev : { ...prev, [sid]: title }))
+            }
+          }
+        } catch (e) { /* 流断开/中止：静默（组件卸载或下次挂载时重建） */ }
+      })()
+      return () => ac.abort()
+    }, [props.connection])
+    // v0.1.2 起 events.mux 消费面移除 → 改用 sessions.list 订阅：官方 rename 后
+    // 列表行 byId[sessionId].title 由 title projection 即时更新（新控制器
+    // dsh-api-session-controller rename 后 projections.apply('title') 即落列表），
+    // 订阅回调秒级收集全量标题快照，浅比较防抖。与 mux 路径并存（旧版 dsh 仍走 mux）。
+    useEffect(() => {
+      const svc = props.sessions
+      const list = svc && svc.list
+      if (!list || typeof list.getSnapshot !== 'function' || typeof list.subscribe !== 'function') return undefined
+      const collect = () => {
+        const snap = list.getSnapshot()
+        const byId = snap && snap.byId
+        if (!byId) return
+        const map = {}
+        for (const id of Object.keys(byId)) {
+          const t = byId[id] && byId[id].title
+          if (typeof t === 'string' && t !== '') map[id] = t
+        }
+        setLiveTitles((prev) => {
+          const pk = Object.keys(prev)
+          const nk = Object.keys(map)
+          if (pk.length === nk.length && nk.every((k) => prev[k] === map[k])) return prev
+          return map
+        })
+      }
+      collect()
+      return list.subscribe(collect)
+    }, [props.sessions])
+
+    return detail === null
+      ? h(SessionFlowOverview, {
+          // M5c 方案C：总览检索词随会话带入详情页，自动执行会话内检索。
+          onOpen: (session, searchQuery) => setDetail({ session, searchQuery }),
+          onClose: props.onClose,
+          sessions: props.sessions,
+          connection: props.connection,
+          liveTitles,
+          intentId,
+          // T3：意图消费后即清除（SessionFlowView 不随详情↔总览切换卸载，状态稳）——
+          // 防止「← 返回」重挂 Overview 时旧意图再次消费把用户拉回详情。
+          onIntentConsumed: () => setIntentId(null),
+        })
+      : h(SessionFlowDetail, {
+          session: detail.session,
+          initialSearchQuery: detail.searchQuery || '',
+          sessions: props.sessions,
+          connection: props.connection,
+          liveTitles,
+          onBack: () => setDetail(null),
+          onClose: props.onClose,
+        })
+  }
+
+  // ── M11：钢琴键会话快切（会话页左侧常驻竖条）─────────────────────
+  // 数据：ctx.sessions.list（ObservableSnapshot 订阅）→ 过滤（排除 subagent、隐藏 blank）
+  // → 排序（updatedAt 降序，收藏置顶）→ 分组（连续 cwd 同段，段间黑白交替）。
+  // 点击 sessions.open(id) 切换；会话切换由框架重挂载会话组件（M7 已验证）。
+  // 错误角标：挂载时拉一次 host list 索引（toolErrors 映射）。
+  // 预览卡：hover 200ms 防抖 → host get 单个会话（缓存秒回）→ fixed 浮层（不裁剪）。
+  // 交互：滚轮/箭头滚动窗口（默认 15 键，兼容大量会话）、键盘 ↑↓/Enter、
+  // 收藏星标（localStorage）、右键「在会话流中打开」（工作台唤起）。
+  const PIANO_FAVS_KEY = 'dsh.sessionFlow.pianoFavs' // 预留（收藏键 v2 迁移用；当前轮次导航不使用）
+  const PENDING_SEARCH_KEY = 'dsh.sessionFlow.pendingSearch' // 方向 A：全文命中跳转桥
+  // M12：并入右栏状态桥——挂 window 全局共享（跨 factory 实例/热重载稳定；
+  // 曾用模块闭包 const dockState，热重载后新 apply 闭包访问不到 → ReferenceError 踩坑）。
+  const dockBridge = (typeof window !== 'undefined' && window.__dshSessionFlowDock__) ||
+    (typeof window !== 'undefined'
+      ? (window.__dshSessionFlowDock__ = { open: false, listeners: new Set(), controller: null })
+      : { open: false, listeners: new Set(), controller: null })
+  const PIANO_WINDOW = 15
+
+  // T6：从嵌入标签页切回「对话」标签。官方 conversation.view 槽位环的标签栏没有
+  // 公开激活 API（标准 props 仅 sessionId/useSession）——DOM 兜底：先按文案定位我们
+  // 自己的标签按钮（「会话流」），再取其父容器（标签栏）的【直接子元素】逐个按文本
+  // 精确匹配「对话 / Chat」——不限定 button：实测部分内置标签（对话/轨迹）不是
+  // <button> 元素，按 button 过滤会漏掉它们、只命中插件 tab（点了会跳 Plan 图，
+  // 实测踩坑）。命中后点击该元素或其内部首个按钮；未命中则不动作（宁可不动也
+  // 不跳错标签）。React 合成监听挂在本事件上，click() 有效。
+  function activateChatTab() {
+    try {
+      const pane = document.querySelector(CONVERSATION_SELECTOR)
+      if (pane === null) return
+      const btns = Array.prototype.slice.call(pane.querySelectorAll('button'))
+      const ours = btns.find((b) => (b.textContent || '').trim().indexOf(STR.entry) >= 0)
+      if (ours === undefined) return
+      const bar = ours.parentElement
+      if (bar === null) return
+      const kids = Array.prototype.slice.call(bar.children)
+      let target = null
+      for (const k of kids) {
+        if (k === ours || (typeof k.contains === 'function' && k.contains(ours))) continue
+        if (/^(对话|Chat)$/.test((k.textContent || '').trim())) { target = k; break }
+      }
+      if (target === null) return
+      const clickable = target.tagName === 'BUTTON' ? target : (target.querySelector('button') || target)
+      clickable.click()
+    } catch (e) {}
+  }
+
+  // 定位目标：会话内容区。注意必须选**滚动容器** scrollBody（data-conversation-scroll）：
+  // viewArea 在滚动场景下 rect 是「内容全尺寸」（如 y=-25687, h=26823），用它定位会把
+  // 竖条甩到视口外（实测踩坑）。scrollBody 才有正确的视口内矩形。
+  // 优先级：scrollBody（滚动容器）→ viewArea（仅无 scrollBody 时兜底）。
+  function pianoViewArea() {
+    const col = document.querySelector(CONVERSATION_SELECTOR)
+    if (col === null) return undefined
+    const body = col.querySelector('[data-conversation-scroll]')
+    if (body instanceof Element) return body
+    const area = col.querySelector('[class*=viewArea]')
+    if (area instanceof Element) return area
+    return undefined
+  }
+
+  // ── 共享：纯色矢量图标 + 轮次 meta chips（rail 增强层与钢琴键详情框共用）──
+  // stroke=currentColor 随主题取色；不用 emoji（用户裁定 2026-09-05）。
+  const SF_ICON_PATHS = {
+    clock: '<circle cx="8" cy="8" r="6.3"/><path d="M8 4.6V8l2.4 1.5"/>',
+    tool: '<rect x="2.4" y="3" width="11.2" height="10" rx="1.6"/><path d="M5 7l2.2 2L5 11M8.6 11h2.6"/>',
+    alert: '<circle cx="8" cy="8" r="6.3"/><path d="M8 5.2v3.2M8 11.2h.01"/>',
+    think: '<path d="M8 2.2a4 4 0 0 0-4 4c0 1.7.9 2.7 1.6 3.5.3.4.4 1.3.4 1.3h4s.1-.9.4-1.3c.7-.8 1.6-1.8 1.6-3.5a4 4 0 0 0-4-4z"/><path d="M6.4 13.6h3.2"/>',
+  }
+  const sfIcon = (name) => {
+    const span = document.createElement('span')
+    span.className = 'sf-ico'
+    span.innerHTML = '<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' + SF_ICON_PATHS[name] + '</svg>'
+    return span
+  }
+  // 时长格式化（ms → 42s / 2m 14s；与 host 导出 fmtDur 同风格）。
+  const sfFmtDur = (ms) => {
+    if (!ms || ms <= 0) return ''
+    const s = Math.round(ms / 1000)
+    if (s < 60) return s + 's'
+    const m = Math.floor(s / 60)
+    return s % 60 === 0 ? m + 'm' : m + 'm ' + (s % 60) + 's'
+  }
+  // meta chips：耗时 / 工具调用 / 错误（红）/ 思考标记。无任何信息时返回 null。
+  const buildTurnMeta = (entry) => {
+    const meta = document.createElement('div')
+    meta.className = 'sf-turnMeta'
+    const chip = (icon, text, cls) => {
+      const c = document.createElement('span')
+      c.className = 'sf-turnMetaChip' + (cls ? ' ' + cls : '')
+      c.appendChild(sfIcon(icon))
+      const t = document.createElement('span')
+      t.textContent = text
+      c.appendChild(t)
+      meta.appendChild(c)
+    }
+    if (entry.durMs > 0) chip('clock', sfFmtDur(entry.durMs))
+    if (entry.tools > 0) chip('tool', STR.railMetaCalls.replace('{tools}', String(entry.tools)))
+    if (entry.errors > 0) chip('alert', STR.railMetaErrors.replace('{errors}', String(entry.errors)), 'err')
+    if (entry.thinking) chip('think', STR.railThinking)
+    return meta.childNodes.length > 0 ? meta : null
+  }
+  // lightTurn → 共享字段（tools/errors/durMs/thinking/conclusion）。
+  const ltMeta = (lt) => ({
+    tools: lt.toolCount || 0,
+    errors: lt.errorCount || 0,
+    durMs: (typeof lt.startTime === 'number' && typeof lt.endTime === 'number' && lt.endTime > lt.startTime) ? lt.endTime - lt.startTime : 0,
+    thinking: lt.hasThinking === true,
+  })
+  // getTurn → 工具分布文本（top4：pwsh ×6 · edit ×3）；共享给 rail 与钢琴键。
+  const toolDistOf = (turn) => {
+    const counts = new Map()
+    for (const st of (turn && turn.steps) || []) for (const c of st.toolCalls || []) counts.set(c.name, (counts.get(c.name) || 0) + 1)
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([n, c]) => n + ' ×' + c).join(' · ')
+  }
+
+  // ── M11：本会话轮次导航（会话页左侧常驻悬浮条目条，v3）──────────
+  // 范围：只显示【当前会话】的对话轮次（用户消息），不跨会话/不跨工作区。
+  // 数据：官方消息行锚点 DOM 驱动（v0.1.2 起 [data-chat-flow] [data-chat-flow-kind=user]，
+  // 旧版回退 data-time-hover-root；零 RPC 实时）。
+  // 轮次 → 结论预览：按顺序索引映射 host get 的 lightTurns（用户消息摊平）。
+  // 交互：点击滚动定位该轮、active 跟随视口第一条、窗口裁剪 + 滚轮/▲▼、
+  // 键盘 ↑↓/Enter、hover 预览卡（该轮用户消息 + 结论）、右键唤起会话流工作台。
+  // 样式：DeepSeek 网页版右侧悬浮消息导航风格（圆角卡片 + 单行截断文字），移到左侧。
+  function TurnKeys(props) {
+    const { sessions, onOpenWorkbench } = props
+    const [entries, setEntries] = useState([]) // [{turn, seq, preview, tools, errors, durMs, thinking}] host 全量用户轮次
+    const distCache = useRef(new Map()) // turn → 工具分布文本（getTurn 懒加载缓存）
+    const [, setDistTick] = useState(0) // distCache 到位后触发详情框重渲染
+    const [activeIdx, setActiveIdx] = useState(-1)
+    // T5 平滑滚动：连续滚动位置（浮点，单位=行）。替代原整数 winOffset 的「每格硬跳
+    // 1 条」——滚轮增量累积（deltaMode 归一）+ 列表 transform 百分比位移（transition
+    // 追逐），渲染窗口 = 可视 WINDOW 条 + 上下缓冲，位移按列表自身高度百分比换算，
+    // 收拢（4px）/展开（30px）行高变化时比例自守恒，无需测量行距。
+    const [scrollPos, setScrollPos] = useState(0)
+    const [kbGlobal, setKbGlobal] = useState(null)
+    const [detailIdx, setDetailIdx] = useState(null) // 右侧信息面板显示的条目索引
+    const detailTimer = useRef(null)
+    const rootRef = useRef(null) // 悬浮条根容器（面板定位换算基准）
+    const [jumpFail, setJumpFail] = useState(false) // 未加载轮次提示
+    const [, force] = useState(0)
+    // detailIdx 镜像：过渡监听 effect（deps []）闭包里读取当前值，避免读到旧 state。
+    const detailIdxRef = useRef(null)
+
+    // 定位自管理：垂直居中悬浮于会话内容区（scrollBody 矩形中心 + translateY(-50%)）。
+    const [pos, setPos] = useState(null) // {left, top(区中心)}
+    useEffect(() => {
+      return () => {
+        const lock = collapseLockRef.current
+        if (lock.timer) clearTimeout(lock.timer)
+        if (lock.retry) clearTimeout(lock.retry)
+      }
+    }, [])
+    useEffect(() => {
+      const compute = () => {
+        const area = pianoViewArea()
+        if (area === undefined) { setPos(null); return }
+        const r = area.getBoundingClientRect()
+        if (r.width === 0 && r.height === 0) return
+        const seat = area.querySelector('[data-composer-seat]')
+        const seatH = seat ? seat.getBoundingClientRect().height : 0
+        setPos({ left: r.left, top: r.top + Math.max(0, r.height - seatH) / 2 })
+      }
+      compute()
+      window.addEventListener('resize', compute)
+      const iv = setInterval(compute, 2000)
+      return () => { window.removeEventListener('resize', compute); clearInterval(iv) }
+    }, [])
+
+    // 订阅会话列表变化：切换会话（current 变化）→ 重渲染刷新条目。
+    useEffect(() => {
+      if (sessions && sessions.list && typeof sessions.list.subscribe === 'function') {
+        return sessions.list.subscribe(() => force((n) => n + 1))
+      }
+      return undefined
+    }, [sessions])
+
+    // 默认定位到【最新一轮】：首次拿到条目后窗口初始 offset 指向末尾
+    // （此前默认从最旧开始，看最新轮次需翻页——已修正）。之后用户手动
+    // 翻页/新消息到达都不再重置（不打断用户当前窗口位置）。
+    const initTailDone = useRef(false)
+    useEffect(() => {
+      if (initTailDone.current || entries.length <= WINDOW) return
+      initTailDone.current = true
+      setScrollPos(entries.length - WINDOW)
+    }, [entries])
+
+    // 当前会话 id（仅取 current，不展示跨会话列表）。
+    const currentId = (() => {
+      try {
+        const s = sessions && sessions.list && typeof sessions.list.getSnapshot === 'function' ? sessions.list.getSnapshot() : null
+        return s && s.current ? s.current : null
+      } catch (e) { return null }
+    })()
+
+    // 条目数据：host get lightTurns 全量用户轮次（含往期，不受 DOM 虚拟列表窗口限制）。
+    // 轮询降载（PERF-ANALYSIS §4.1）：大会话 get 每轮 ~383ms（缓存 JSON.parse）——
+    // 观察消息流 DOM 变化（新消息/流式渲染）→ 立即刷新并切高频（3s）；
+    // 空闲时低频兜底（15s），避免常驻高频轮询空转。
+    useEffect(() => {
+      if (!currentId) { setEntries([]); return undefined }
+      let alive = true
+      // 切换会话后重置「已定位」标记，下次加载重新定位到新会话末尾。
+      initTailDone.current = false
+      const refresh = () => {
+        api('get', { sessionId: currentId }).then((json) => {
+          if (!alive || !json || !json.ok) return
+          const flat = []
+          for (const lt of json.lightTurns || []) {
+            for (const u of lt.userMessages || []) {
+              flat.push({ turn: lt.turn, seq: u.seq, preview: u.preview, ...ltMeta(lt) })
+            }
+          }
+          // 防御：同一 seq 只保留一条（避免同一条消息重复渲染 = 「最后一条显示两次」）。
+          const seen = new Set()
+          const dedup = flat.filter((e) => {
+            if (seen.has(e.seq)) return false
+            seen.add(e.seq)
+            return true
+          })
+          setEntries((prev) => {
+            if (prev.length === dedup.length && prev.length > 0 && prev[prev.length - 1].seq === dedup[dedup.length - 1].seq) return prev
+            return dedup
+          })
+        }).catch(() => {})
+      }
+      const ACTIVE_MS = 3000
+      const IDLE_MS = 15000
+      let iv = null
+      const schedule = (delay) => {
+        if (iv) clearInterval(iv)
+        iv = setInterval(refresh, delay)
+      }
+      // DOM 变化（新消息/流式渲染）：立即刷新 + 切高频；1s 节流防虚拟列表滚动刷屏。
+      let flowObs = null
+      let lastDomRefresh = 0
+      const onDomChange = () => {
+        if (!alive) return
+        const now = Date.now()
+        if (now - lastDomRefresh < 1000) return
+        lastDomRefresh = now
+        refresh()
+        schedule(ACTIVE_MS)
+      }
+      const flowEl = document.querySelector('[data-chat-flow=""]') || document.querySelector('[data-focus-flow=""]')
+      if (flowEl) {
+        flowObs = new MutationObserver(onDomChange)
+        flowObs.observe(flowEl, { childList: true, subtree: true })
+      }
+      refresh()
+      schedule(IDLE_MS)
+      return () => { alive = false; if (iv) clearInterval(iv); if (flowObs) flowObs.disconnect() }
+    }, [currentId])
+
+    // DOM 行工具：用户消息行锚点。v0.1.2 起官方会话流重构进 dsh-client-ui-chat：
+    // data-time-hover-root 移除，行结构 = [data-chat-flow] > [data-chat-flow-key]
+    // （data-chat-flow-kind 区分 user/steering/turn-process/…，官方内部查行同款
+    // 选择器）；旧版 dsh 回退 data-time-hover-root 锚点（dsh-navbar 同款机制）。
+    // 零 RPC 实时。steering（随转消息）不算新轮次，不计入。
+    const domRows = () => {
+      const next = document.querySelectorAll('[data-chat-flow] [data-chat-flow-kind="user"]')
+      if (next.length > 0) return [...next]
+      return [...document.querySelectorAll('[data-time-hover-root]')]
+        .filter((r) => !r.hasAttribute('data-pending-steering'))
+        .filter((r) => !r.hasAttribute('data-turn-tail') && r.querySelector('[class*=bubble]') !== null)
+    }
+    const textOf = (row) => {
+      const b = row.querySelector('[class*=bubble]')
+      return b ? String(b.textContent || '').replace(/\s+/g, ' ').trim() : ''
+    }
+    // 归一化：剥离 markdown 标记（**加粗**/行内代码/链接/符号），使 host 原始
+    // preview 与 DOM 渲染后的 textContent 可比（否则 startsWith 永远失败 →
+    // 近轮次误判「未找到」+ 加载循环误匹配其他轮次，实测踩坑）。
+    const norm = (s) => String(s || '')
+      .replace(/`{1,3}[^`]*`{1,3}/g, ' ')
+      .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .replace(/[*_#>|~-]{1,3}/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+    // 行→条目映射（单调整体映射，active 定位与点击跳转共用）：
+    // 按文档序游标推进匹配用户行（「继续」类重复文本不会误配到前面条目）；
+    // 助手行未匹配时继承前一条用户行的条目（轮次归属）——视口首行为助手
+    // 回复时 active 仍指向其所属用户轮次，不再丢失高亮（T1 修复点一）。
+    const mapRows = () => {
+      const rows = domRows()
+      const idxs = new Array(rows.length).fill(-1)
+      let cursor = 0
+      let last = -1
+      for (let i = 0; i < rows.length; i++) {
+        const t = norm(textOf(rows[i]))
+        if (t) {
+          for (let j = cursor; j < entries.length; j++) {
+            const core = norm(String(entries[j].preview || '').replace(/…+$/u, '')).slice(0, 50)
+            if (core && t.includes(core.slice(0, 30))) { cursor = j + 1; last = j; break }
+          }
+        }
+        idxs[i] = last
+      }
+      return { rows, idxs }
+    }
+    // 条目 → DOM 行：从映射中取首个归属该条目的行（用户行本身；映射按文档序
+    // 单调推进，重复文本不会命中到前面的同文条目）。
+    const findRow = (entry) => {
+      const target = entries.indexOf(entry)
+      if (target === -1) return null
+      const { rows, idxs } = mapRows()
+      for (let i = 0; i < rows.length; i++) if (idxs[i] === target) return rows[i]
+      return null
+    }
+
+    // 未加载轮次 → 委托官方轮次导航引擎（v0.1.2+ 吸收官方独有能力）：合成 click
+    // 命中目标刻度，官方 navigate 自动加载未载入页并跳转（其引擎含 busy 态/加载锚定，
+    // 优于我们的「只提示」）。合成事件 clientY 按官方 itemAtPointer 几何反解
+    // （offset = clientY - rect.top + scrollTop - 6 = idx*10）；官方处理挂在 nav 的
+    // onClick 且只读 event.clientY，与事件落在哪个子元素无关（刻度按钮
+    // pointer-events:none，不能直接 btn.click()——clientY=0 会误算成第一条）。
+    const delegateToRail = (entry) => {
+      try {
+        const nav = document.querySelector(RAIL_SELECTOR)
+        if (!nav) return false
+        const turns = [...nav.querySelectorAll('button[aria-label]')]
+          .map((b) => { const m = /(\d+)/.exec(b.getAttribute('aria-label') || ''); return m ? Number(m[1]) : null })
+        const idx = turns.indexOf(entry.turn)
+        if (idx < 0) return false
+        const rect = nav.getBoundingClientRect()
+        const scroller = nav.firstElementChild
+        const st = scroller ? scroller.scrollTop : 0
+        const y = rect.top + (idx * 10 + 6) - st
+        nav.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: rect.left + 10, clientY: y }))
+        return true
+      } catch (e) { return false }
+    }
+    // 点击定位：先查该轮次是否已加载（DOM 中能否匹配到对应行）——
+    // 已加载 → 平滑滚动定位；未加载 → 委托官方 rail 引擎加载跳转（v0.1.2+）；
+    // rail 缺席（旧版 dsh）→ 只提示、不跳转（自动加载循环会让消息流乱滚/跳错
+    // 位置，实测踩坑；用户需先在会话区向上滚动加载历史再点击）。
+    const open = (entry) => {
+      const row = findRow(entry)
+      if (row) { row.scrollIntoView({ behavior: 'smooth', block: 'start' }); return }
+      if (delegateToRail(entry)) return
+      setJumpFail(true)
+      setTimeout(() => setJumpFail(false), 2600)
+    }
+
+    // 详情框 meta 注入（与 rail 增强层同款信息：矢量 chips + 工具分布行；
+    // imperative ref 填充，data-sig 幂等）。工具分布懒加载：详情驻留 200ms 拉
+    // getTurn 聚合（distCache 跨 hover 缓存，到位后 tick 触发 ref 重填）。
+    const fillDetailMeta = (el, entry) => {
+      if (!el) return
+      const dist = distCache.current.get(entry.turn) || ''
+      const sig = entry.turn + '|' + dist
+      if (el.dataset.sig === sig) return
+      el.dataset.sig = sig
+      el.replaceChildren()
+      const meta = buildTurnMeta(entry)
+      if (meta) el.appendChild(meta)
+      if (dist !== '') {
+        const tools = document.createElement('div')
+        tools.className = 'sf-rail-conclusionTools'
+        tools.textContent = dist
+        el.appendChild(tools)
+      }
+    }
+    useEffect(() => {
+      if (detailIdx === null || !currentId) return undefined
+      const entry = entries[detailIdx]
+      if (!entry || entry.tools === 0 || distCache.current.has(entry.turn)) return undefined
+      const turn = entry.turn
+      const timer = setTimeout(() => {
+        api('getTurn', { sessionId: currentId, turn }).then((json) => {
+          if (!json || !json.ok || !json.turn) return
+          distCache.current.set(turn, toolDistOf(json.turn))
+          setDistTick((n) => n + 1)
+        }).catch(() => {})
+      }, 200)
+      return () => clearTimeout(timer)
+    }, [detailIdx, currentId, entries])
+
+    // active：视口内最靠上的可见行 → 映射条目索引高亮（阅读位置跟随）。
+    // 可见判定用 bottom 进入视口（含被顶部裁切一半的行）——此前 top>=0 会
+    // 跳过被裁切行导致高亮偏晚一轮（T1 修复点二）。
+    useEffect(() => {
+      const compute = () => {
+        if (entries.length === 0) { setActiveIdx(-1); return }
+        const { rows, idxs } = mapRows()
+        let target = -1
+        let bestTop = Number.POSITIVE_INFINITY
+        for (let i = 0; i < rows.length; i++) {
+          const r = rows[i].getBoundingClientRect()
+          if (r.bottom > 1 && r.top < bestTop) { bestTop = r.top; target = i }
+        }
+        if (target === -1) { setActiveIdx(entries.length - 1); return }
+        const idx = idxs[target]
+        // idx<0（视口首行在第一条用户消息之前）：保持现状，不清高亮不跳变。
+        if (idx >= 0) setActiveIdx(idx)
+      }
+      compute()
+      const iv = setInterval(compute, 800)
+      return () => clearInterval(iv)
+    }, [entries])
+
+    const WINDOW = sfSettings.current.pianoWindow
+    const hidden = entries.length < 2
+    // 虚拟窗口：renderStart 起渲染 WINDOW+3 条（上方缓冲 1 + 下方缓冲 2）。
+    const maxOff = Math.max(0, entries.length - WINDOW)
+    const clampedPos = Math.max(0, Math.min(maxOff, scrollPos))
+    const renderStart = Math.max(0, Math.floor(clampedPos) - 1)
+    const renderCount = Math.min(WINDOW + 3, entries.length - renderStart)
+    const windowed = entries.slice(renderStart, renderStart + renderCount)
+    const winOffset = Math.round(clampedPos) // 逻辑口径（高亮/面板/▲▼基准）四舍五入
+    const canUp = clampedPos > 0.01
+    const canDown = clampedPos < maxOff - 0.01
+    // T5 显示位（ref，非 state——逐帧 DOM 更新不过 React）：renderStartRef 镜像供
+    // 逐帧换算；displayPos 由 rAF 追逐 clampedPos（指数趋近 .22/帧 ≈ .16s 到位）。
+    const displayPosRef = useRef(0)
+    const renderStartRef = useRef(0)
+    renderStartRef.current = renderStart
+    const applyShift = () => {
+      const list = listRef.current
+      if (list === null || list.children.length < 2) return
+      const pitch = list.children[1].offsetTop - list.children[0].offsetTop
+      if (!(pitch > 0)) return
+      list.style.transform = 'translate3d(0,' + (-(displayPosRef.current - renderStartRef.current) * pitch).toFixed(2) + 'px,0)'
+      // strip 高度显式管理：clipper 脱流后 strip 不能靠内容撑高（塌缩=整条消失）。
+      // 纯内容高 = 可见行数 × 实测行距 − 间隙（12×35−5=415 / 12×9−5=103）；呼吸
+      // 在 strip 外（head 下边距 8 + 根下内边距 8）；键高动画期间 RO 逐帧跟随。
+      const rows = Math.min(WINDOW, entries.length)
+      const strip = stripRef.current
+      if (strip !== null) strip.style.height = (rows * pitch - 5).toFixed(1) + 'px'
+    }
+    useEffect(() => {
+      let raf = 0
+      const step = () => {
+        const target = Math.max(0, Math.min(Math.max(0, entries.length - WINDOW), scrollPos))
+        const cur = displayPosRef.current
+        if (Math.abs(target - cur) < 0.002) {
+          displayPosRef.current = target
+          applyShift()
+          return
+        }
+        displayPosRef.current = cur + (target - cur) * 0.22
+        applyShift()
+        raf = requestAnimationFrame(step)
+      }
+      raf = requestAnimationFrame(step)
+      return () => cancelAnimationFrame(raf)
+    }, [scrollPos, entries.length])
+    // renderStart 跳变（内容重排）后同步重设 transform（渲染后、绘制前），显示位
+    // 不变 → 无视觉跳变；列表高度随键高变化（收拢/展开）时重算行距保持对齐。
+    useEffect(() => { applyShift() })
+    useEffect(() => {
+      const list = listRef.current
+      if (list === null || typeof ResizeObserver !== 'function') return undefined
+      const ro = new ResizeObserver(() => applyShift())
+      ro.observe(list)
+      return () => ro.disconnect()
+    }, [renderStart, entries.length])
+
+    // 悬浮条滚轮/▲▼：只翻悬浮条自身窗口，绝不影响会话区滚动（用户明确要求）。
+    const onKeyDown = (e) => {
+      if (entries.length === 0) return
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault()
+        const dir = e.key === 'ArrowDown' ? 1 : -1
+        setKbGlobal((prev) => {
+          const base = prev === null ? (dir > 0 ? -1 : entries.length) : prev
+          return Math.max(0, Math.min(entries.length - 1, base + dir))
+        })
+      } else if (e.key === 'Enter' && kbGlobal !== null && entries[kbGlobal]) {
+        e.preventDefault()
+        open(entries[kbGlobal])
+      }
+    }
+    useEffect(() => {
+      if (kbGlobal === null) return
+      setScrollPos((o) => {
+        const p = Math.max(0, Math.min(maxOff, o))
+        if (kbGlobal < p) return kbGlobal
+        if (kbGlobal >= p + WINDOW) return Math.max(0, Math.min(maxOff, kbGlobal - WINDOW + 1))
+        return o
+      })
+    }, [kbGlobal])
+
+    // 滚轮平滑滚动：React onWheel 是被动监听器（passive: true），内部 preventDefault
+    // 无效并刷屏告警（实测踩坑）——改原生 addEventListener('wheel', {passive:false})。
+    // 增量累积（deltaMode 归一为像素；~0.012 行/px：一整格滚轮 ≈1.2 行，触控板小
+    // 增量连续累积），rAF 追逐成连续位移。**静止吸附**：滚轮停 ~170ms 后取整到最近
+    // 整行（chase 平滑滑过去）——小数位置会让顶/底条露半截（「展示了 T23 的一部
+    // 分」实测踩坑），用户要求静止时恰好完整 12 条。
+    const stripRef = useRef(null)
+    const listRef = useRef(null) // T5 虚拟滚动列表容器（键的父级，transform 平移）
+    const snapTimerRef = useRef(0)
+    useEffect(() => {
+      const el = stripRef.current
+      if (el === null) return undefined
+      const onNativeWheel = (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        let dy = e.deltaY
+        if (e.deltaMode === 1) dy *= 33
+        else if (e.deltaMode === 2) dy *= 300
+        setScrollPos((o) => Math.max(0, Math.min(Math.max(0, entries.length - WINDOW), o + dy * sfSettings.current.pianoWheelSpeed)))
+        // 静止吸附：连续滚动不断顺延；停止后吸附到最近整行。
+        if (snapTimerRef.current !== 0) clearTimeout(snapTimerRef.current)
+        snapTimerRef.current = setTimeout(() => {
+          snapTimerRef.current = 0
+          setScrollPos((o) => Math.round(o))
+        }, sfSettings.current.pianoSnapMs)
+      }
+      el.addEventListener('wheel', onNativeWheel, { passive: false })
+      return () => {
+        el.removeEventListener('wheel', onNativeWheel)
+        if (snapTimerRef.current !== 0) { clearTimeout(snapTimerRef.current); snapTimerRef.current = 0 }
+      }
+    }, [entries.length])
+
+    // 面板锚定刷新：detailPos 在渲染时刻从键的实时矩形计算——mouseenter 常发生在
+    // 收拢/半展开几何（root 宽 32），面板被锚在收拢条右缘=鼠标旁，且展开完成后无
+    // 重渲染而停留在旧坐标。监听过渡结束（React 合成事件不含 transitionend 的完整
+    // 语义），仅几何属性（width/height/max-height）且面板显示中时强制重渲染，用最终
+    // 几何重算（面板可见延迟 .28s > 展开 .26s，用户看到的就是正确位置）。
+    useEffect(() => {
+      const el = rootRef.current
+      if (el === null) return undefined
+      const onEnd = (e) => {
+        if (detailIdxRef.current !== null &&
+            (e.propertyName === 'width' || e.propertyName === 'height' || e.propertyName === 'max-height')) {
+          force((t) => t + 1)
+        }
+      }
+      el.addEventListener('transitionend', onEnd)
+      return () => el.removeEventListener('transitionend', onEnd)
+    }, [])
+
+    // 右侧信息面板：hover 条目/键盘聚焦时弹出该轮信息（保留弹出面板、移除原生
+    // tooltip——tooltip 与面板重复且视觉凌乱）；鼠标在条目间移动 250ms 宽限。
+    const showDetail = (idx) => {
+      const lock = collapseLockRef.current
+      if (Date.now() < lock.until) {
+        // 锁检查必须先于 clearTimeout：收拢条上的合成 mouseenter（skipped）不得
+        // 清掉待执行的隐藏定时器（实测：连续 skipped 把面板拖了 ~1s 不走）。
+        if (lock.kind === 'enter') {
+          // 进入护栏期（hover-guard）：推迟到锁过期后重试——驻留则面板照常出现，
+          // 快速路过则随离场作废（重试前检查 root 仍 :hover）。
+          if (lock.retry) clearTimeout(lock.retry)
+          lock.retry = setTimeout(() => {
+            lock.retry = null
+            if (rootRef.current !== null && rootRef.current.matches(':hover')) showDetail(idx)
+          }, Math.max(20, lock.until - Date.now() + 20))
+          return
+        }
+        return
+      }
+      if (lock.retry) { clearTimeout(lock.retry); lock.retry = null }
+      if (detailTimer.current) clearTimeout(detailTimer.current)
+      setDetailIdx(idx)
+    }
+    const hideDetail = () => {
+      const lock = collapseLockRef.current
+      if (lock.retry) { clearTimeout(lock.retry); lock.retry = null }
+      if (detailTimer.current) clearTimeout(detailTimer.current)
+      // 宽限 250ms：标题行/首键边界窄带来回移动时，面板滑出动画（.24s）频繁被
+      // 打断重入，加长宽限减少闪动。
+      detailTimer.current = setTimeout(() => setDetailIdx(null), 250)
+    }
+    const collapseLockRef = useRef({ until: 0, timer: null, retry: null, kind: '' })
+    // hover-guard / collapse-lock 二合一：进入锁 120ms（「快速路过闪动」——锁窗内
+    // :hover 不展开，路过即零动画；驻留 120ms 后照常展开）＋离开锁 300ms（防几何
+    // 自反馈回路：展开态越界→收拢→胶囊条弹到静止鼠标下→合成 mouseenter→再展开）。
+    // kind 区分 showDetail 策略：enter 锁→推迟重试（驻留后面板照常），leave 锁→跳过。
+    const armCollapseLock = (ms, kind) => {
+      const lock = collapseLockRef.current
+      const el = rootRef.current
+      const w = typeof ms === 'number' ? ms : 300
+      if (el !== null && el.getAttribute('data-collapse-lock') === null) {
+        el.setAttribute('data-collapse-lock', '')
+      }
+      lock.kind = kind === 'enter' ? 'enter' : 'leave'
+      lock.until = Date.now() + w
+      if (lock.timer) clearTimeout(lock.timer)
+      lock.timer = setTimeout(() => {
+        lock.until = 0
+        lock.kind = ''
+        if (lock.timer) { clearTimeout(lock.timer); lock.timer = null }
+        const el2 = rootRef.current
+        if (el2 !== null) el2.removeAttribute('data-collapse-lock')
+      }, w)
+    }
+    useEffect(() => () => { if (detailTimer.current) clearTimeout(detailTimer.current) }, [])
+    // 键盘聚焦跟随显示面板。
+    useEffect(() => {
+      if (kbGlobal !== null && entries[kbGlobal]) showDetail(kbGlobal)
+    }, [kbGlobal])
+
+    // detailIdx 镜像同步（供 deps [] 的过渡监听闭包读取当前值）。
+    useEffect(() => { detailIdxRef.current = detailIdx }, [detailIdx])
+
+    const rootStyle = pos === null ? { display: 'none' } : {
+      left: pos.left + 'px',
+      top: pos.top + 'px',
+      transform: 'translateY(-50%)',
+      display: hidden ? 'none' : undefined,
+    }
+
+    const detailEntry = detailIdx !== null ? entries[detailIdx] : null
+    // 面板位置：absolute 相对悬浮条容器（容器有 translateY(-50%) transform，fixed
+    // 会退化为相对容器——必须按容器内偏移计算）。条目 = 列表（pk-list）直接子元素，
+    // 索引 = detailIdx - renderStart（虚拟窗口含缓冲）；越界修正按视口坐标换算回容器内。
+    let detailPos = null
+    const rootRect = rootRef.current ? rootRef.current.getBoundingClientRect() : null
+    if (detailEntry && rootRect && listRef.current) {
+      const el = listRef.current.children[detailIdx - renderStart]
+      if (el instanceof Element) {
+        const r = el.getBoundingClientRect()
+        const topV = Math.min(r.top, Math.max(4, window.innerHeight - 320))
+        detailPos = { left: r.right - rootRect.left + 8, top: topV - rootRect.top }
+      }
+    }
+
+    return h('div', {
+      'data-dsh-piano-keys': '', ref: rootRef, style: rootStyle,
+      onPointerEnter: () => {
+        // 进入锁（hover-guard 120ms）：快速路过收拢条零动画零闪动；驻留后照常展开。
+        armCollapseLock(120, 'enter')
+      },
+      onPointerLeave: () => {
+        // 面板随收拢同步消失：root 级离开=真实收拢开始，立即隐藏（淡出 .18s 与收拢
+        // .22-.26s 同步收完）——不走 250ms 宽限+滑出拖尾 ~0.5s。
+        if (detailIdx !== null) {
+          if (detailTimer.current) clearTimeout(detailTimer.current)
+          setDetailIdx(null)
+        }
+        // 锁只在「当前不在锁窗内」时武装：锁窗内的离开（条本就被抑制未展开）不续期，
+        // 否则收拢条边缘快速进出让锁自续（实测 1.4s 不展开），300ms 后照常展开。
+        if (Date.now() >= collapseLockRef.current.until) armCollapseLock()
+      },
+    },
+      h('div', {
+        className: 'pk-head',
+        // 热区链：hover 标题行 ≡ hover 第一个键（CSS 侧高亮已链；JS 侧面板跟随）。
+        // head↔gap↔首键连续同态，消灭「横条出现消失」的状态边界。
+        onMouseEnter: () => showDetail(winOffset),
+        onMouseLeave: hideDetail,
+      },
+        h('span', { className: 'pk-headLabel' }, STR.pianoTitle),
+        h('div', { className: 'pk-navGroup' },
+          h('button', { className: 'pk-navBtn', disabled: !canUp, onClick: () => { const n = Math.max(0, winOffset - 1); setScrollPos(n); showDetail(n) }, title: STR.expanded }, '▲'),
+          h('button', { className: 'pk-navBtn', disabled: !canDown, onClick: () => { const n = Math.min(Math.max(0, entries.length - WINDOW), winOffset + 1); setScrollPos(n); showDetail(n) }, title: STR.collapsed }, '▼'),
+        ),
+      ),
+      h('div', { className: 'pk-strip', ref: stripRef, tabIndex: 0, onKeyDown, onMouseDown: (e) => { if (e.target === e.currentTarget) e.preventDefault() }, 'aria-label': STR.pianoTitle },
+        // T5 裁剪框（strip 内容盒）：缓冲键全裁，可见区恰好 12 行；strip 本体保留
+        // 内边距（视觉呼吸）+ 定位（relative）。
+        h('div', { className: 'pk-clip' },
+          // T5 虚拟滚动列表：transform 由 JS 逐帧驱动（applyShift），不设 style
+          // 以免 React 重渲染覆盖 JS 值。
+          h('div', { className: 'pk-list', ref: listRef },
+          windowed.map((entry, idx) => {
+            const gi = renderStart + idx
+            const act = activeIdx === gi
+            return h('button', {
+              key: 'turn-' + gi + '-' + entry.seq,
+              type: 'button',
+              className: 'pk-key' + (act ? ' pk-keyActive' : '') + (kbGlobal === gi ? ' pk-keyFocus' : ''),
+              // 点击后主动失焦：避免 button 焦点让 :focus-within 常驻展开
+              // （鼠标移开后悬浮条收不拢，箭头「残留」——实测踩坑）。
+              onClick: (e) => { open(entry); e.currentTarget.blur() },
+              onMouseEnter: () => showDetail(gi),
+              onMouseLeave: hideDetail,
+              onContextMenu: (e) => {
+                e.preventDefault()
+                if (onOpenWorkbench) onOpenWorkbench()
+              },
+            },
+              // 轮次序号：展开态常驻【最左侧】独立模块（与文本模块分离，互不侵占）。
+              h('span', { className: 'pk-turnNo' }, 'T' + entry.turn),
+              h('span', { className: 'pk-label' }, entry.preview || '（空）'),
+            )
+          }),
+          ),
+        ),
+      ),
+      // 信息面板：跟随 hover 条目右侧展开（fixed，位置由 detailPos 控制）；
+      // 常驻渲染 + hidden 类做滑入/滑出；内容 key 变化触发 pkSlideIn。
+      h('div', { className: 'pk-detail' + (detailEntry ? '' : ' hidden'), style: detailPos, onMouseEnter: () => showDetail(detailIdx), onMouseLeave: hideDetail },
+        detailEntry && h('div', { key: 'h' + detailEntry.turn, className: 'pk-detailHead' }, 'T' + detailEntry.turn + ' · ' + STR.user),
+        detailEntry && h('div', { key: 'm' + detailEntry.turn, className: 'pk-detailMeta', ref: (el) => fillDetailMeta(el, detailEntry) }),
+        detailEntry && h('div', { key: 'b' + detailEntry.turn, className: 'pk-detailBody' }, detailEntry.preview || '（空）'),
+      ),
+      // 跳转状态提示：常驻渲染 + hidden 类（从下方淡入/淡出）；未加载轮次提示。
+      h('div', { className: 'pk-status' + (jumpFail ? '' : ' hidden') + (jumpFail ? ' warn' : '') },
+        jumpFail ? STR.pianoJumpFail : '',
+      ),
+    )
+  }
+
+  // ── M12：详情并入右侧栏（details 槽位轻量视图）────────────────────
+  // 随会话自动切换（槽位 session 作用域 key 重挂载）；数据复用 host get/getTurn；
+  // 回合列表直接复用 TurnList（展开 → TimelineTurns 完整渲染）。
+  function DetailsDockView(props) {
+    const { sessionId, connection, onExit } = props
+    const [state, setState] = useState({ phase: 'loading', error: null, data: null })
+    // T8-B：重挂载续播时折叠集合按钉住时间线播种（新回合照常并入折叠）。
+    const [collapsed, setCollapsed] = useState(() => {
+      const s = new Set()
+      if (dockBridge.live && dockBridge.live.on && dockBridge.live.lastState) {
+        for (const t of dockBridge.live.lastState.timeline || []) s.add('turn-' + t.turn)
+      }
+      return s
+    })
+    const collapsedInit = useRef(false)
+    const [turnItems, setTurnItems] = useState(() => new Map())
+    const loadingTurns = useRef(new Set())
+
+    // ── T6 dock 实时模式：复用实时通道（sessions.history → derive，与详情页 M6
+    // 同构），但只显示「开播后」的对话——首轮记录基准回合集合，此后仅显示新出现
+    // 的回合（含开播时正在运行的回合）；不加载历史回合（档案 get 在实时期间跳过）。
+    // ── T8-B 钉住原会话：dock 视图随会话切换整体重挂载（槽位 session 作用域
+    // key），组件级实时状态必丢——实时状态提升到 dockBridge.live 模块级存储
+    // （钉住 sid/基准/已见/定时器/最近状态跨挂载存活）：开播即钉住当时的会话，
+    // GUI 切走后右栏继续直播原会话并显示提示条（告知用户），可一键转播当前会话。
+    const liveStore = dockBridge.live || (dockBridge.live = {
+      on: false, sid: undefined, timer: null, base: null, seen: new Set(),
+      lastState: null, conn: undefined, emit: null, tick: null,
+    })
+    const [liveOn, setLiveOn] = useState(() => liveStore.on)
+    const [liveState, setLiveState] = useState(() => liveStore.lastState
+      || { phase: 'idle', error: null, timeline: [], running: false, eventCount: 0, health: null })
+    const fetchLive = useRef(async () => {})
+    fetchLive.current = async () => {
+      const sid = liveStore.sid
+      const conn = liveStore.conn
+      if (sid === undefined || conn === undefined || conn.api === undefined || conn.api.sessions === undefined) {
+        liveStore.lastState = { phase: 'error', error: STR.liveUnavailable, timeline: [], running: false, eventCount: 0, health: null }
+        if (liveStore.emit !== null) liveStore.emit(liveStore.lastState)
+        return
+      }
+      if (liveStore.emit !== null) liveStore.emit({ ...liveStateKeep(), phase: 'loading' })
+      try {
+        const val = sfRemoteRef.current ? await sfRemoteRef.current.pageBySession(sid, 400) : undefined
+        if (val === undefined) {
+          liveStore.lastState = { ...liveStateKeep(), phase: 'error', error: STR.liveFail }
+          if (liveStore.emit !== null) liveStore.emit(liveStore.lastState)
+          return
+        }
+        const events = historyEventsOf(val)
+        const derived = await api('derive', { events, now: Date.now() })
+        if (!derived || !derived.ok) {
+          liveStore.lastState = { ...liveStateKeep(), phase: 'error', error: (derived && derived.error) || STR.liveFail }
+          if (liveStore.emit !== null) liveStore.emit(liveStore.lastState)
+          return
+        }
+        const tl = (derived.timeline && derived.timeline.turns) || []
+        const running = derived.running === true
+        if (liveStore.base === null) {
+          // 开播基准：当时已存在的全部回合；运行中的那个除外（它是「正在发生的
+          // 实时对话」，从开播起就要展示其后续流式变化）。
+          liveStore.base = new Set(tl.map((t) => t.turn))
+          if (running && tl.length > 0) liveStore.base.delete(tl[tl.length - 1].turn)
+        }
+        // 只保留：开播基准之后新出现的回合 + 开播时正在运行的那个回合。
+        const display = tl.filter((t) => !liveStore.base.has(t.turn))
+        const newTurns = display.filter((t) => !liveStore.seen.has(t.turn))
+        for (const t of display) liveStore.seen.add(t.turn)
+        if (newTurns.length > 0 && liveStore.emit !== null) {
+          setCollapsed((prev) => {
+            const next = new Set(prev)
+            for (const t of newTurns) next.add('turn-' + t.turn)
+            return next
+          })
+        }
+        liveStore.lastState = { phase: 'ready', error: null, timeline: display, running, eventCount: events.length, health: derived.health || null }
+        if (liveStore.emit !== null) liveStore.emit(liveStore.lastState)
+      } catch (e) {
+        liveStore.lastState = { ...liveStateKeep(), phase: 'error', error: STR.liveFail + ': ' + String(e && e.message || e) }
+        if (liveStore.emit !== null) liveStore.emit(liveStore.lastState)
+      }
+    }
+    // 保留当前显示数据、只换 phase 的辅助（emit 前构造）。
+    function liveStateKeep() {
+      return liveStore.lastState || { phase: 'idle', error: null, timeline: [], running: false, eventCount: 0, health: null }
+    }
+    const enterLive = () => {
+      liveStore.on = true
+      liveStore.sid = sessionId // T8-B：开播即钉住当前会话
+      liveStore.seen.clear()
+      liveStore.base = null
+      liveStore.lastState = null
+      setLiveOn(true)
+      liveFollowRef.current = true // T7：开播默认吸底
+      fetchLive.current()
+      if (liveStore.timer === null) {
+        liveStore.timer = setInterval(() => { if (liveStore.tick !== null) liveStore.tick() }, sfSettings.current.livePollMs)
+      }
+    }
+    const exitLive = () => {
+      liveStore.on = false
+      liveStore.sid = undefined
+      liveStore.seen.clear()
+      liveStore.base = null
+      liveStore.lastState = null
+      if (liveStore.timer !== null) { clearInterval(liveStore.timer); liveStore.timer = null }
+      setLiveOn(false)
+      setLiveState({ phase: 'idle', error: null, timeline: [], running: false, eventCount: 0, health: null })
+      // 回到档案视图：重新加载（实时期间可能已产生新回合）。
+      setState({ phase: 'loading', error: null, data: null })
+      setTurnItems(new Map())
+      collapsedInit.current = false
+    }
+    // T8-B：转播当前会话（提示条按钮）——重钉到当前 sessionId、基准重算。
+    const rebindLive = () => {
+      liveStore.sid = sessionId
+      liveStore.seen.clear()
+      liveStore.base = null
+      fetchLive.current()
+    }
+    // 挂载注册：连接对象/状态发射器/定时器分发指向当前实例（跨重挂载续播）；
+    // 卸载时若 3s 内无新实例接管（dock 真正关闭走 onExit→exitLive），停表清理。
+    useEffect(() => {
+      liveStore.conn = props.connection
+      liveStore.emit = setLiveState
+      liveStore.tick = () => { fetchLive.current() }
+      return () => {
+        if (liveStore.emit === setLiveState) liveStore.emit = null
+        if (liveStore.tick !== null) {
+          const t = liveStore.tick
+          setTimeout(() => { if (liveStore.tick === t && liveStore.emit === null) {
+            if (liveStore.timer !== null) { clearInterval(liveStore.timer); liveStore.timer = null }
+            liveStore.on = false; liveStore.tick = null
+          } }, 500)
+        }
+      }
+    }, [])
+    // T7 实时吸底跟随（dock）：dk-body 距底 ≤40px 时每次刷新平滑滚到新底部。
+    const dkBodyRef = useRef(null)
+    const liveFollowRef = useRef(true)
+    const onDkBodyScroll = () => {
+      const el = dkBodyRef.current
+      if (el === null) return
+      liveFollowRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= sfSettings.current.liveFollowPx
+    }
+    useEffect(() => {
+      if (!liveOn || liveState.timeline === null || liveState.timeline.length === 0) return
+      const el = dkBodyRef.current
+      if (el !== null && liveFollowRef.current) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+    }, [liveState.timeline, liveOn])
+
+    useEffect(() => {
+      let alive = true
+      // T8-B：实时钉住在 liveStore.sid（会话切换不重绑）；档案加载仅非实时时进行。
+      if (!liveOn) {
+        setState({ phase: 'loading', error: null, data: null })
+        setTurnItems(new Map())
+        collapsedInit.current = false
+        if (!sessionId) { setState({ phase: 'empty', error: null, data: null }); return }
+        api('get', { sessionId }).then((json) => {
+          if (!alive) return
+          if (json && json.ok) {
+            setState({ phase: 'ready', error: null, data: json })
+          } else {
+            setState({ phase: 'error', error: (json && json.error) || 'get failed', data: null })
+          }
+        }).catch((e) => { if (alive) setState({ phase: 'error', error: String(e), data: null }) })
+      }
+      return () => { alive = false }
+    }, [sessionId, liveOn])
+
+    useEffect(() => {
+      if (state.phase !== 'ready' || collapsedInit.current) return
+      collapsedInit.current = true
+      const all = new Set()
+      for (const lt of state.data.lightTurns || []) all.add('turn-' + lt.turn)
+      setCollapsed(all)
+    }, [state.phase])
+
+    const toggle = (key) => {
+      setCollapsed((prev) => {
+        const next = new Set(prev)
+        if (next.has(key)) next.delete(key)
+        else next.add(key)
+        return next
+      })
+    }
+    const ensureTurn = async (turnNo) => {
+      if (turnItems.has(turnNo) || loadingTurns.current.has(turnNo)) return
+      loadingTurns.current.add(turnNo)
+      try {
+        const json = await api('getTurn', { sessionId, turn: turnNo })
+        if (json && json.ok && json.turn) {
+          setTurnItems((prev) => new Map(prev).set(turnNo, json.turn))
+        }
+      } catch (e) {
+        console.warn('[dsh-session-flow] getTurn failed', turnNo, e)
+      } finally {
+        loadingTurns.current.delete(turnNo)
+      }
+    }
+
+    const data = state.data
+    const lightTurns = (data && data.lightTurns) || []
+    const toolStats = (data && data.toolStats) || []
+    // 规则摘要（与详情页同口径，精简版）。
+    const ruleTaskCount = lightTurns.filter((lt) => lt.userMessages && lt.userMessages.length > 0).length
+    const ruleGoal = (() => {
+      for (const lt of lightTurns) {
+        if (lt.userMessages && lt.userMessages.length > 0) return String(lt.userMessages[0].preview).slice(0, 150)
+      }
+      return ''
+    })()
+    const ruleConclusion = (() => {
+      for (let i = lightTurns.length - 1; i >= 0; i--) {
+        if (lightTurns[i].conclusionPreview) return String(lightTurns[i].conclusionPreview).slice(0, 220)
+      }
+      return ''
+    })()
+    const ruleTools = toolStats.slice(0, 6).map((t) => t.name + '·' + t.count).join('  ')
+
+    return h('div', { className: 'dk-root' },
+      h('div', { className: 'dk-head' },
+        // T6：标题「会话流」+ 按钮**紧跟标题**（左侧区）；spacer 吃掉右侧余量——
+        // 彻底避开右上角 dsh-better-sidebar toggleCluster（视口级常驻浮钮区）。
+        h('span', { className: 'dk-title', title: STR.dockHint }, STR.entry),
+        props.connection !== undefined && h('button', {
+          className: 'dk-btn' + (liveOn ? ' dk-btnLive' : ''),
+          onClick: liveOn ? exitLive : enterLive,
+          title: STR.dockLiveHint,
+        }, liveOn ? STR.liveActive + ' ✕' : STR.live),
+        h('button', { className: 'dk-btn', onClick: onExit }, STR.dockExit),
+        h('span', { className: 'dk-headSpacer' }),
+      ),
+      h('div', { className: 'dk-body', ref: dkBodyRef, onScroll: onDkBodyScroll },
+        liveOn && h('div', { className: 'sf-liveBar', style: { flex: 'none' } },
+          h('span', { className: 'sf-badge sf-badgeRun', style: { flex: 'none' } }, STR.liveActive),
+          healthBadge(liveState.health),
+          h('span', { className: 'sf-liveText' },
+            h('span', { className: 'sf-muted', style: { flex: 'none' } }, (liveState.eventCount || 0) + ' ' + STR.liveEvents),
+            liveState.phase === 'loading' && h('span', { className: 'sf-muted', style: { flex: 'none' } }, STR.liveRefreshing),
+          ),
+        ),
+        liveOn && liveState.phase === 'error' && h('div', { className: 'sf-hint', style: { color: '#d43b3b' } }, liveState.error),
+        liveOn && liveStore.sid !== undefined && liveStore.sid !== sessionId && h('div', { className: 'dk-pinBar', title: liveStore.sid },
+          h('span', { className: 'dk-pinText' }, STR.dockPinNotice),
+          h('button', { className: 'dk-btn', onClick: rebindLive }, STR.dockPinRebind),
+        ),
+        liveOn && liveState.phase !== 'error' && liveState.timeline.length === 0 && h('div', { className: 'sf-hint' }, STR.dockLiveEmpty),
+        liveOn && liveState.timeline.length > 0 && h(TimelineTurns, {
+          turns: liveState.timeline, collapsed, toggle, liveActive: liveState.running === true,
+          activeTurn: null, setActiveTurn: () => {},
+        }),
+        !liveOn && state.phase === 'loading' && h('div', { className: 'sf-hint' }, STR.detailLoading),
+        !liveOn && state.phase === 'empty' && h('div', { className: 'sf-hint' }, STR.dockEmpty),
+        !liveOn && state.phase === 'error' && h('div', { className: 'sf-hint', style: { color: '#d43b3b' } }, STR.detailFailed + ': ' + String(state.error)),
+        !liveOn && state.phase === 'ready' && h('div', { className: 'dk-summary' },
+          ruleTaskCount > 0 && h('div', { className: 'dk-summaryRow' },
+            h('span', { className: 'dk-summaryTag' }, STR.summaryTaskCount),
+            h('span', { className: 'dk-summaryText' }, ruleTaskCount),
+          ),
+          ruleGoal && h('div', { className: 'dk-summaryRow' },
+            h('span', { className: 'dk-summaryTag' }, STR.summaryGoal),
+            h('span', { className: 'dk-summaryText' }, ruleGoal),
+          ),
+          ruleConclusion && h('div', { className: 'dk-summaryRow' },
+            h('span', { className: 'dk-summaryTag' }, STR.summaryConclusion),
+            h('span', { className: 'dk-summaryText' }, ruleConclusion),
+          ),
+          ruleTools && h('div', { className: 'dk-summaryRow' },
+            h('span', { className: 'dk-summaryTag' }, STR.summaryTools),
+            h('span', { className: 'dk-summaryText' }, ruleTools),
+          ),
+          data.summary && h('div', { className: 'dk-summaryFull' }, data.summary),
+        ),
+        !liveOn && state.phase === 'ready' && lightTurns.length === 0 && h('div', { className: 'sf-hint' }, STR.noTimeline),
+        !liveOn && state.phase === 'ready' && h(TurnList, {
+          sessionId,
+          lightTurns,
+          collapsed,
+          toggle,
+          ensureTurn,
+          turnItems,
+        }),
+      ),
+    )
+  }
+
+  // ── M11×v0.1.2：官方轮次导航（TurnNavigatorRail）增强层 ─────────────
+  // 官方 rail 无扩展槽位（chat 槽位仅 node/turnTail/assistant-actions/commandview），
+  // 本层走 DOM 观察（家族传统：观察器 + 自愈重挂），挂载我们的独有增量：
+  //   1) hover 结论段注入官方预览卡：该轮「结论摘要」（官方预览只有 prompt/response
+  //      片段）+ 工具统计（错误角标方案已撤——开发会话多数轮次都有工具错误，
+  //      刻度全员红点等于无信息，用户实机裁定 2026-09-05）；
+  //   2) 右键 rail → 唤起会话流工作台。
+  // 定位：nav[aria-label=轮次导航|Turn navigation]；几何换算复刻官方 itemAtPointer
+  // （TURN_SPACING 10px / RAIL_INSET 6px + scroller.scrollTop）；turn 号从刻度按钮
+  // aria-label（跳转到第 N 轮 / Jump to turn N）提取，索引↔turn 精确映射，不依赖
+  // 「index+1 == turn」假设。官方 navigate 引擎（含未载入轮次自动加载跳转）原样保留，
+  // 我们不拦截点击。
+  const RAIL_SELECTOR = 'nav[aria-label="轮次导航"], nav[aria-label="Turn navigation"]'
+  function RailEnhancer(props) {
+    const { sessions, railEl, onOpenWorkbench } = props
+    const [turnData, setTurnData] = useState([]) // [{turn, preview, conclusion, tools, errors}]
+    const [hoverInfo, setHoverInfo] = useState(null) // {turn, clientY, railLeft}
+    const [, force] = useState(0)
+
+    // 订阅会话列表变化：切换会话 → 重拉条目。
+    useEffect(() => {
+      if (sessions && sessions.list && typeof sessions.list.subscribe === 'function') {
+        return sessions.list.subscribe(() => force((n) => n + 1))
+      }
+      return undefined
+    }, [sessions])
+
+    const currentId = (() => {
+      try {
+        const s = sessions && sessions.list && typeof sessions.list.getSnapshot === 'function' ? sessions.list.getSnapshot() : null
+        return s && s.current ? s.current : null
+      } catch (e) { return null }
+    })()
+
+    // 条目数据：host get lightTurns（每轮一条，对齐官方 rail item 粒度）。
+    // 轮询节奏同钢琴键：DOM 变化切 3s 高频，空闲 15s 兜底。
+    useEffect(() => {
+      if (!currentId) { setTurnData([]); return undefined }
+      let alive = true
+      const refresh = () => {
+        api('get', { sessionId: currentId }).then((json) => {
+          if (!alive || !json || !json.ok) return
+          const rows = (json.lightTurns || []).map((lt) => ({
+            turn: lt.turn,
+            preview: lt.userMessages && lt.userMessages[0] ? String(lt.userMessages[0].preview || '') : '',
+            conclusion: String(lt.conclusionPreview || ''),
+            tools: lt.toolCount || 0,
+            errors: lt.errorCount || 0,
+            durMs: (typeof lt.startTime === 'number' && typeof lt.endTime === 'number' && lt.endTime > lt.startTime) ? lt.endTime - lt.startTime : 0,
+            thinking: lt.hasThinking === true,
+          }))
+          setTurnData((prev) => {
+            if (prev.length === rows.length && prev.length > 0 && prev[prev.length - 1].turn === rows[rows.length - 1].turn) return prev
+            return rows
+          })
+        }).catch(() => {})
+      }
+      const ACTIVE_MS = 3000
+      const IDLE_MS = 15000
+      let iv = null
+      const schedule = (delay) => { if (iv) clearInterval(iv); iv = setInterval(refresh, delay) }
+      let flowObs = null
+      let lastDomRefresh = 0
+      const onDomChange = () => {
+        if (!alive) return
+        const now = Date.now()
+        if (now - lastDomRefresh < 1000) return
+        lastDomRefresh = now
+        refresh()
+        schedule(ACTIVE_MS)
+      }
+      const flowEl = document.querySelector('[data-chat-flow=""]') || document.querySelector('[data-chat-flow]')
+      if (flowEl) {
+        flowObs = new MutationObserver(onDomChange)
+        flowObs.observe(flowEl, { childList: true, subtree: true })
+      }
+      refresh()
+      schedule(IDLE_MS)
+      return () => { alive = false; if (iv) clearInterval(iv); if (flowObs) flowObs.disconnect() }
+    }, [currentId])
+
+    // rail 交互：hover 几何换算 + 右键唤起工作台。
+    useEffect(() => {
+      if (!railEl) { setHoverInfo(null); return undefined }
+      const scroller = railEl.firstElementChild // 官方结构：nav.frame > div.scroller
+      const railTurns = () => [...railEl.querySelectorAll('button[aria-label]')]
+        .map((b) => { const m = /(\d+)/.exec(b.getAttribute('aria-label') || ''); return m ? Number(m[1]) : null })
+        .filter((n) => n !== null)
+      const onMove = (e) => {
+        const rect = railEl.getBoundingClientRect()
+        const st = scroller ? scroller.scrollTop : 0
+        const idx = Math.max(0, Math.round((e.clientY - rect.top + st - 6) / 10))
+        const turns = railTurns()
+        const turn = idx < turns.length ? turns[idx] : null
+        setHoverInfo((prev) => {
+          const prevTurn = prev === null ? null : prev.turn
+          return prevTurn === turn ? prev : (turn === null ? null : { turn })
+        })
+      }
+      const onLeave = () => setHoverInfo(null)
+      const onContext = (e) => { e.preventDefault(); onOpenWorkbench() }
+      railEl.addEventListener('pointermove', onMove)
+      railEl.addEventListener('pointerleave', onLeave)
+      railEl.addEventListener('contextmenu', onContext)
+      return () => {
+        railEl.removeEventListener('pointermove', onMove)
+        railEl.removeEventListener('pointerleave', onLeave)
+        railEl.removeEventListener('contextmenu', onContext)
+      }
+    }, [railEl, onOpenWorkbench])
+
+    // 工具分布懒加载（独特信息维度，官方 preview 只有 prompt/response 片段）：
+    // hover 驻留 250ms 后拉 getTurn，聚合工具名 ×次数 top4（防扫过时每刻度一请求）。
+    const [toolDist, setToolDist] = useState(null) // {turn, text}
+    useEffect(() => {
+      if (!railEl || hoverInfo === null || !currentId) { setToolDist(null); return undefined }
+      const turn = hoverInfo.turn
+      const timer = setTimeout(() => {
+        api('getTurn', { sessionId: currentId, turn }).then((json) => {
+          if (!json || !json.ok || !json.turn) return
+          const text = toolDistOf(json.turn)
+          setToolDist((prev) => (prev && prev.turn === turn && prev.text === text) ? prev : { turn, text })
+        }).catch(() => {})
+      }, 250)
+      return () => clearTimeout(timer)
+    }, [railEl, hoverInfo, currentId])
+
+    // hover 增强段注入官方预览卡内部（单卡融合——另起一卡会与官方预览上下堆叠成
+    // 两大块，实测很丑）。官方 preview 容器 = rail 内 class 以 _preview 结尾的元素
+    //（CSS module hash 前缀 + preview/previewPrompt/previewResponse 三段，用
+    // /(?:^|_)preview(?:$|\s)/ 精确命中容器）；React 复用 preview 元素跨轮次渲染 →
+    // data-sig 核对（轮次+工具分布到位状态），变化即重建；observer 监视 rail 子树，
+    // preview 出现/消失/被重渲染时自愈。**独特性原则（用户裁定 2026-09-05）：只给
+    // 官方 preview 没有的信息维度——耗时 / 工具统计与分布 / 错误 / 思考标记；
+    // 结论不再展示（与官方 response 片段重复，用户二次裁定撤下）；图标一律纯色
+    // 矢量（stroke=currentColor），不用 emoji**。
+    // 高度解禁：官方 preview 固定 --turn-preview-height:100px 且溢出裁剪——注入段
+    // 会被裁成「残缺卡」（实测踩坑）；注入期间内联 height:auto + maxHeight 放开，
+    // 撤注入时还原内联样式。
+    useEffect(() => {
+      if (!railEl) return undefined
+      const findPreview = () => [...railEl.querySelectorAll('[class*=preview]')]
+        .find((el) => /(?:^|_)preview(?:$|\s)/.test(String(el.className)))
+      const cleanup = () => {
+        for (const n of railEl.querySelectorAll('.sf-rail-conclusion')) n.remove()
+        const p = findPreview()
+        if (p) { p.style.height = ''; p.style.maxHeight = ''; p.style.overflow = '' }
+      }
+      const enhance = () => {
+        const preview = findPreview()
+        const turn = hoverInfo === null ? null : hoverInfo.turn
+        const entry = turn === null ? undefined : turnData.find((t) => t.turn === turn)
+        if (!preview || !entry || (entry.durMs === 0 && entry.tools === 0)) { cleanup(); return }
+        preview.style.height = 'auto'
+        preview.style.maxHeight = '280px'
+        preview.style.overflow = 'hidden'
+        let node = preview.querySelector(':scope > .sf-rail-conclusion')
+        if (!node) {
+          node = document.createElement('div')
+          node.className = 'sf-rail-conclusion'
+          preview.appendChild(node)
+        }
+        const dist = toolDist !== null && toolDist.turn === entry.turn ? toolDist.text : ''
+        const sig = entry.turn + '|' + dist
+        if (node.dataset.sig === sig) return
+        node.dataset.sig = sig
+        node.replaceChildren()
+        // meta chips 行（纯色矢量图标）：耗时 · n 次工具 · m 错误（红）· 含思考
+        const meta = buildTurnMeta(entry)
+        if (meta) node.appendChild(meta)
+        // 工具分布行（懒加载到位后经 sig 变化重建本节点）
+        if (dist !== '') {
+          const tools = document.createElement('div')
+          tools.className = 'sf-rail-conclusionTools'
+          tools.textContent = dist
+          node.appendChild(tools)
+        }
+      }
+      enhance()
+      const obs = new MutationObserver(enhance)
+      obs.observe(railEl, { childList: true, subtree: true })
+      return () => { obs.disconnect(); cleanup() }
+    }, [railEl, hoverInfo, turnData, toolDist])
+
+    return null
+  }
+
+  // ── 导航总挂载：官方 rail 增强层 ⇄ 经典钢琴键悬浮条 ────────────────
+  // 默认（v0.1.2+，用户裁定 2026-09-05）：经典悬浮条默认开启（pianoClassicStrip
+  // 默认 true），与官方 rail 增强层并存——左右双导航各司其职（我们：预览卡/右键
+  // 工作台/滚轮窗口/键盘；官方：完整历史刻度）；设置里可各自关闭。旧版 dsh
+  // （无官方 rail）railEl=null 时 classic 恒 true，功能不丢。
+  function NavRoot(props) {
+    const { settingsCtrl } = props
+    const [, force] = useState(0)
+    const [railEl, setRailEl] = useState(null)
+    useEffect(() => (settingsCtrl ? settingsCtrl.subscribe(() => force((n) => n + 1)) : undefined), [settingsCtrl])
+    useEffect(() => {
+      const find = () => {
+        const nav = document.querySelector(RAIL_SELECTOR)
+        setRailEl((prev) => (prev === nav || (prev === null && nav === null) ? prev : nav))
+      }
+      find()
+      const obs = new MutationObserver(find)
+      obs.observe(document.body, { childList: true, subtree: true })
+      return () => obs.disconnect()
+    }, [])
+    const classicWanted = sfSettings.current.pianoClassicStrip === true
+    const enhanceWanted = sfSettings.current.railEnhance !== false
+    // railHideOfficial：完全屏蔽官方刻度条（只留我们的悬浮条）；隐藏期间增强层不挂。
+    const hideOfficial = sfSettings.current.railHideOfficial === true
+    useEffect(() => {
+      if (railEl) railEl.style.display = hideOfficial ? 'none' : ''
+      return () => { if (railEl) railEl.style.display = '' }
+    }, [railEl, hideOfficial])
+    const showClassic = classicWanted || railEl === null
+    const showEnhance = enhanceWanted && railEl !== null && !hideOfficial
+    return h(React.Fragment, null,
+      showClassic ? h(TurnKeys, { sessions: props.sessions, connection: props.connection, onOpenWorkbench: props.onOpenWorkbench }) : null,
+      showEnhance ? h(RailEnhancer, { sessions: props.sessions, railEl, onOpenWorkbench: props.onOpenWorkbench }) : null)
+  }
+
+  // ── M11：钢琴键竖条挂载（DOM 注入 + 自愈）────────────────────────
+  // 容器挂 document.body（dsh-navbar 同款模式）：完全脱离会话区布局树，
+  // 不干扰 conversation 的 flex/grid 布局；fixed 定位由组件自管理。
+  // MutationObserver 自愈：容器丢失（布局重建）时自动恢复。
+  function mountPianoKeys(controller, sessions, connection, settingsCtrl) {
+    let root = undefined
+    let container = undefined
+    let waitObserver = null
+
+    // M11×视图：轮次条只在「对话」tab（ChatView）激活时显示——官方 viewArea
+    // 只渲染激活视图（only: active.id），轨迹/Plan图/会话流 tab 下 ChatView 卸载，
+    // `[data-chat-flow]` 随之消失（会话流标签页有自己的 sf-view，不冲突）。
+    const syncChatVisibility = () => {
+      if (container === undefined) return
+      const chatFlow = document.querySelector('[data-chat-flow]')
+      container.style.display = chatFlow !== null ? '' : 'none'
+    }
+
+    const ensure = () => {
+      if (container !== undefined) {
+        if (container.isConnected) return
+        if (root) { try { root.unmount() } catch (e) {} root = undefined }
+        container = undefined
+      }
+      container = document.createElement('div')
+      document.body.appendChild(container)
+      try {
+        root = createRoot(container)
+        root.render(h(NavRoot, {
+          sessions,
+          connection,
+          settingsCtrl: settingsCtrl || null,
+          onOpenWorkbench: () => controller.open(),
+        }))
+        syncChatVisibility()
+      } catch (e) {
+        console.error('[dsh-session-flow:piano] render failed:', e)
+        if (root) { try { root.unmount() } catch (e2) {} root = undefined }
+        if (container) { container.remove(); container = undefined }
+      }
+    }
+
+    waitObserver = new MutationObserver(() => { ensure(); syncChatVisibility() })
+    waitObserver.observe(document.body, { childList: true, subtree: true })
+    ensure()
+
+    return () => {
+      waitObserver.disconnect()
+      if (root) { try { root.unmount() } catch (e) {} root = undefined }
+      if (container) { container.remove(); container = undefined }
+    }
+  }
+
+  // ── 侧边栏入口（DOM 级注入 + 自愈）────────────────────────────────
+  const ICON = `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 3.5h11M2.5 8h11M2.5 12.5h7"/></svg>`
+  function sidebarRoot() {
+    const column = document.querySelector('[data-pane="sidebar"], [class*="sidebarCol"]')
+    if (column === null) return undefined
+    const logoOwner = column.querySelector('[class*="logoRow"]')?.parentElement
+    return logoOwner ?? (column.firstElementChild)
+  }
+
+  function newSessionButton(root) {
+    const nested = root.querySelector('button[class*="newSession"]')
+    if (nested !== null) return nested
+    for (const child of root.children) {
+      if (child.tagName === 'BUTTON') return child
+    }
+    return undefined
+  }
+
+  function createEntry(controller) {
+    const entry = document.createElement('button')
+    entry.type = 'button'
+    entry.dataset.dshSessionFlowEntry = ''
+    entry.className = 'sf-entry'
+    entry.setAttribute('aria-label', STR.entry)
+    entry.innerHTML = `<span class="sf-entryIcon">${ICON}</span><span class="sf-entryLabel">${STR.entry}</span>`
+    entry.addEventListener('click', () => { controller.toggle() })
+    return entry
+  }
+
+  function placeEntry(root, entry) {
+    const button = newSessionButton(root)
+    if (button === undefined) return false
+    if (entry.parentElement !== root) {
+      const row = button.closest('[class*="logoRow"]')
+      const base = (row !== null && row.parentElement === root) ? row : button
+      const family = Array.from(root.children).filter(
+        (el) => el instanceof HTMLElement && el.matches('[data-dsh-taskboard-entry], [data-dsh-ssh-entry], [data-dsh-session-flow-entry]'),
+      )
+      // 固定插到家族块末尾：taskboard/ssh 各自把「自己」插到家族最前，
+      // 互相抢占会让相对顺序随加载/自愈时序漂移；我们把位置钉在末尾，
+      // 任何时序下都稳定排在最后（顺序：任务看板 → SSH → 会话流）。
+      const last = family.length > 0 ? family[family.length - 1] : base
+      root.insertBefore(entry, last.nextElementSibling)
+    }
+    return true
+  }
+
+  function mountSidebarEntry(controller) {
+    const entry = createEntry(controller)
+    let root = undefined
+    let placed = false
+    let rootObserver = null
+    let waitObserver = null
+
+    const tryPlace = () => {
+      if (root !== undefined && !root.isConnected) {
+        if (rootObserver) rootObserver.disconnect()
+        root = undefined
+        placed = false
+      }
+      if (placed) {
+        if (document.body.contains(entry)) return
+        if (rootObserver) rootObserver.disconnect()
+        root = undefined
+        placed = false
+      }
+      root = root || sidebarRoot()
+      if (root === undefined) return
+      placed = placeEntry(root, entry)
+      if (placed && rootObserver === null) {
+        rootObserver = new MutationObserver(() => {
+          if (root === undefined || !root.isConnected) {
+            placed = false
+            tryPlace()
+            return
+          }
+          if (!root.contains(entry)) placed = placeEntry(root, entry)
+        })
+        rootObserver.observe(root, { childList: true, subtree: true })
+      }
+    }
+
+    waitObserver = new MutationObserver(() => { tryPlace() })
+    waitObserver.observe(document.body, { childList: true, subtree: true })
+
+    const syncActive = () => {
+      if (controller.getSnapshot().open) entry.dataset.active = 'true'
+      else delete entry.dataset.active
+    }
+    const unsubscribe = controller.subscribe(syncActive)
+    syncActive()
+    tryPlace()
+
+    return () => {
+      if (waitObserver) waitObserver.disconnect()
+      if (rootObserver) rootObserver.disconnect()
+      unsubscribe()
+      entry.remove()
+    }
+  }
+
+  // ── 中栏全页视图（DOM 级接管，参照 task-board board-mount）────────
+  function mountBoard(controller, sessions, connection) {
+    let root = undefined
+    let container = undefined
+    let waitObserver = null
+
+    const ensure = () => {
+      if (container !== undefined) return
+      const column = document.querySelector(CONVERSATION_SELECTOR)
+      if (column === null) return
+      container = document.createElement('div')
+      container.dataset.dshSessionFlowView = ''
+      // 注意：容器不加任何会设置 display 的 class，可见性完全由
+      // [data-dsh-session-flow-view] 属性规则控制（见 STYLE 注释）。
+      column.appendChild(container)
+      root = createRoot(container)
+      root.render(h(SessionFlowView, { sessions, connection, onClose: () => controller.close() }))
+    }
+
+    waitObserver = new MutationObserver(() => { ensure() })
+    waitObserver.observe(document.body, { childList: true, subtree: true })
+
+    const applyActive = () => {
+      if (controller.getSnapshot().open) {
+        for (const attr of OTHER_ACTIVE_ATTRS) document.documentElement.removeAttribute(attr)
+        document.documentElement.setAttribute(ACTIVE_ATTR, '')
+        document.dispatchEvent(new CustomEvent(ACTIVATE_EVENT, { detail: PANEL_NAME }))
+      } else {
+        document.documentElement.removeAttribute(ACTIVE_ATTR)
+      }
+    }
+    const unsubscribe = controller.subscribe(applyActive)
+    applyActive()
+    ensure()
+
+    return () => {
+      waitObserver.disconnect()
+      unsubscribe()
+      document.documentElement.removeAttribute(ACTIVE_ATTR)
+      if (root) { root.unmount(); root = undefined }
+      if (container) { container.remove(); container = undefined }
+    }
+  }
+
+  // ── 插件体 ─────────────────────────────────────────────────────────
+  const inject = ['sessions', 'connection', 'slots', 'layout', 'remote', 'remote.session']
+
+  function apply(ctx) {
+    try {
+      // 注入样式（幂等）。
+      if (!document.getElementById('dsh-session-flow-style')) {
+        const style = document.createElement('style')
+        style.id = 'dsh-session-flow-style'
+        style.textContent = STYLE + '\n' + SETTINGS_STYLE
+        document.head.appendChild(style)
+      }
+
+      const sessions = ctx.get('sessions')
+      const connection = ctx.get('connection')
+      // v0.1.2 RPC 双面适配（remote.session 新面优先，connection 旧面回退）。
+      sfRemoteRef.current = sfBuildRemote(ctx, connection)
+      // 设置控制器引用：settings.section 注册块内创建，挂载钢琴键/导航增强层时
+      // 传给 NavRoot 做设置变更即时切换（不可用则为 null，走默认值）。
+      let sfSettingsCtrl = null
+
+      const state = { open: false, listeners: new Set() }
+      const controller = {
+        getSnapshot: () => ({ open: state.open }),
+        subscribe: (fn) => {
+          state.listeners.add(fn)
+          return () => state.listeners.delete(fn)
+        },
+        toggle: () => {
+          state.open = !state.open
+          for (const fn of state.listeners) fn()
+        },
+        close: () => {
+          if (state.open) {
+            state.open = false
+            for (const fn of state.listeners) fn()
+          }
+        },
+        open: () => {
+          // 二期：嵌入标签页「打开完整工作台」→ 唤起侧边栏工作台。
+          if (!state.open) {
+            state.open = true
+            for (const fn of state.listeners) fn()
+          }
+        },
+      }
+
+      const onActivate = (event) => {
+        if (event.detail !== PANEL_NAME && state.open) controller.close()
+      }
+      document.addEventListener(ACTIVATE_EVENT, onActivate)
+
+      // 二期：嵌入原生会话页 —— conversation.view 槽位环（会话作用域标签页）。
+      // 参照 ui-trajectory(order 10) / plan-graph(order 20) 的注册模式：
+      // slots.inject 自带生命周期（插件卸载自动移除标签页），无需手动清理。
+      // label 支持字符串或惰性求值函数；order 越大越靠后（对话/轨迹/Plan图 之后）。
+      const slots = ctx.get('slots')
+      if (slots !== undefined && typeof slots.inject === 'function' && typeof slots.register === 'function') {
+        try {
+          slots.inject('conversation.view', () => slots.register({
+            name: 'conversation.view',
+            id: 'session-flow',
+            order: 30,
+            label: STR.entry,
+          }, (props) => h(SessionFlowTab, {
+            sessionId: props ? props.sessionId : undefined,
+            sessions,
+            connection,
+            onOpenWorkbench: () => controller.open(),
+          })))
+        } catch (error) {
+          console.error('[dsh-session-flow] conversation.view registration failed:', error)
+        }
+        // 会话健康芯片：官方 conversation.session.header.actions 槽位（ui-jobs/ui-subagent 同款），
+        // order -9 紧随官方模式标识（agent-preset label, order -10）右侧。
+        // 点击芯片 → workbenchBridge 意图桥直达该会话详情。
+        try {
+          slots.inject('conversation.session.header.actions', () => slots.register({
+            name: 'conversation.session.header.actions',
+            id: 'session-flow-health',
+            order: -9,
+          }, (slotProps) => h(SessionHealthChip, {
+            sessionId: slotProps ? slotProps.sessionId : undefined,
+            sessions,
+            connection,
+            onOpen: () => {
+              const sid = slotProps && slotProps.sessionId
+              if (sid) workbenchBridge.open(sid)
+              controller.open()
+            },
+          })))
+        } catch (error) {
+          console.error('[dsh-session-flow] header health chip registration failed:', error)
+        }
+        // 插件设置页：settings.section 顶级 tab（order 140，排在皮肤中心 120/宠物 130 之后）。
+        // 读写经 settingsScope（pet 同款：优先 webUiSettings 桥，回退 settingsScope）；
+        // 两者都不可用（旧宿主/未暴露）时不注册 tab。controller 闭包持有，
+        // 卸载经 slots.inject 返回的 disposer 释放 scope 订阅。
+        try {
+          const settingsBinder = ctx.get('webUiSettings') ?? ctx.get('settingsScope')
+          if (settingsBinder !== undefined && settingsBinder !== null && typeof settingsBinder.bind === 'function') {
+            sfSettingsCtrl = new SfSettingsController(settingsBinder.bind({ namespace: 'session-flow' }))
+            slots.inject('settings.section', () => {
+              const unregister = slots.register({
+                name: 'settings.section',
+                id: 'session-flow',
+                order: 140,
+                label: () => STR.settingsTitle,
+              }, () => h(SessionFlowSettingsSection, { controller: sfSettingsCtrl }))
+              return () => { sfSettingsCtrl.dispose(); unregister() }
+            })
+          }
+        } catch (error) {
+          console.error('[dsh-session-flow] settings.section registration failed:', error)
+        }
+      }
+
+      // M12：详情并入右侧栏 —— details 槽位动态占用（priority -1 低于官方 tool-details）。
+      // 并入开启时注册 + **打开官方 details 列（layout.openDetails——列默认宽度 0 不可见，
+      // plan-graph 同款；曾漏开列导致「无响应」，实测踩坑）**；退出/卸载注销 + closeDetails。
+      // 官方在会话切换时自动 closeDetails（无法阻止）——并入期间：
+      //  ① html 打 data-dsh-dock-active 标记 → CSS 禁用 grid 列宽过渡（切换无「关→开」动画）；
+      //  ② 高频守护（150ms）快速重开列 → 视觉上右栏内容直接刷新为新会话。
+      const layout = ctx.get('layout')
+      let detailsRegistration = null
+      let detailsGuard = null
+      const setDockActive = (on) => {
+        try {
+          if (on) document.documentElement.setAttribute('data-dsh-dock-active', '')
+          else document.documentElement.removeAttribute('data-dsh-dock-active')
+        } catch (e) {}
+      }
+
+      // M12×aionui：官方 details 把手在 5 轨 grid 下的位置补偿已由上游
+      // aionui-panel ≥0.2.0 接管（dsh-web-ui PR #311，applyGrid 每帧重算；
+      // 3 轨时退化为官方原值）。本插件过渡兼容层 detailsHandleCompat 已移除
+      // （2026-08-18，本机 aionui 0.2.0 实证含修复；旧版 aionui 请升级）。
+      const ensureColumn = () => {
+        if (dockBridge.open && layout !== undefined && typeof layout.openDetails === 'function') {
+          try { layout.openDetails() } catch (e) {}
+        }
+      }
+      const syncDetails = () => {
+        if (dockBridge.open && detailsRegistration === null && slots !== undefined && typeof slots.inject === 'function') {
+          try {
+            detailsRegistration = slots.inject('details', () => slots.register({
+              name: 'details',
+              priority: -1,
+            }, (props) => h(DetailsDockView, {
+              sessionId: props ? props.sessionId : undefined,
+              connection,
+              onExit: () => dockBridge.controller.close(),
+            })))
+            setDockActive(true)
+            ensureColumn()
+          } catch (error) {
+            console.error('[dsh-session-flow] details dock registration failed:', error)
+            detailsRegistration = null
+          }
+        } else if (!dockBridge.open && detailsRegistration !== null) {
+          try { detailsRegistration() } catch (e) {}
+          detailsRegistration = null
+          setDockActive(false)
+          if (layout !== undefined && typeof layout.closeDetails === 'function') {
+            try { layout.closeDetails() } catch (e) {}
+          }
+        }
+      }
+      dockBridge.controller = {
+        getSnapshot: () => ({ open: dockBridge.open }),
+        subscribe: (fn) => {
+          dockBridge.listeners.add(fn)
+          return () => dockBridge.listeners.delete(fn)
+        },
+        open: () => {
+          if (!dockBridge.open) {
+            dockBridge.open = true
+            syncDetails()
+            // 会话切换时官方会自动 closeDetails —— 高频守护快速重开（无动画，内容直接刷新）。
+            if (detailsGuard === null) {
+              detailsGuard = setInterval(() => { ensureColumn() }, 150)
+            }
+            for (const fn of dockBridge.listeners) fn()
+          }
+        },
+        close: () => {
+          if (dockBridge.open) {
+            dockBridge.open = false
+            syncDetails()
+            if (detailsGuard !== null) { clearInterval(detailsGuard); detailsGuard = null }
+            for (const fn of dockBridge.listeners) fn()
+          }
+        },
+      }
+      syncDetails()
+
+      // 点击侧边栏会话/工作区行 → 交还中栏给会话。
+      const onClickSidebarRow = (event) => {
+        if (!state.open) return
+        const target = event.target
+        if (target === null || !(target instanceof Element)) return
+        if (target.closest(SIDEBAR_ROW_SELECTOR) !== null) controller.close()
+      }
+      document.addEventListener('click', onClickSidebarRow, true)
+
+      // 视图激活期间的滚动护栏：底层会话的自动跟随滚动（流式输出时持续触发）
+      // 会把挂载在窗格内的绝对定位视图顶出视口（“top 栏逐渐上抬被半遮住”）。
+      // 捕获阶段监听所有 scroll 事件，把会话流视图子树之外的任何滚动容器复位到 0
+      // （会话流打开时底层内容本来就不可见，复位无副作用）。
+      const onAnyScroll = (event) => {
+        if (!state.open) return
+        const target = event.target
+        if (target === document) {
+          const se = document.scrollingElement
+          if (se !== null && se.scrollTop !== 0) se.scrollTop = 0
+          return
+        }
+        if (!(target instanceof Element)) return
+        const viewEl = document.querySelector(VIEW_SELECTOR)
+        if (viewEl !== null && viewEl.contains(target)) return
+        if (target.scrollTop !== 0) target.scrollTop = 0
+      }
+      document.addEventListener('scroll', onAnyScroll, true)
+
+      const disposers = []
+      try {
+        disposers.push(mountSidebarEntry(controller))
+        disposers.push(mountBoard(controller, sessions, connection))
+        // M11：钢琴键会话快切（会话页左侧常驻竖条）；挂载失败不影响其他功能。
+        disposers.push(mountPianoKeys(controller, sessions, connection, sfSettingsCtrl))
+      } catch (error) {
+        console.error('[dsh-session-flow] mount failed:', error)
+      }
+
+      const teardown = () => {
+        // M12：卸载时注销 details 槽位占用（恢复官方 tool-details）+ 关列 + 清守护 + 移除标记。
+        if (detailsRegistration) {
+          try { detailsRegistration() } catch (e) {}
+          detailsRegistration = null
+        }
+        if (detailsGuard !== null) { clearInterval(detailsGuard); detailsGuard = null }
+        setDockActive(false)
+        if (layout !== undefined && typeof layout.closeDetails === 'function') {
+          try { layout.closeDetails() } catch (e) {}
+        }
+        dockBridge.open = false
+        document.removeEventListener(ACTIVATE_EVENT, onActivate)
+        document.removeEventListener('click', onClickSidebarRow, true)
+        document.removeEventListener('scroll', onAnyScroll, true)
+        for (const dispose of disposers.splice(0)) dispose()
+      }
+      if (typeof ctx.effect === 'function') ctx.effect(() => teardown)
+      else window.addEventListener('beforeunload', teardown)
+    } catch (error) {
+      console.error('[dsh-session-flow] apply failed:', error)
+    }
+  }
+
+  module.exports = { inject, apply }
+  // 必须返回 module.exports：client-modules 的 materialize 直接用 factory 的
+  // 返回值作为插件导出（不 return 会导致加载器拿到 undefined → boot 失败）。
+  return module.exports;
+}})

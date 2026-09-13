@@ -3,7 +3,9 @@
 本插件所有显著变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [1.4.0] - 2026-09-13
+
+适配 dsh v0.1.3 存档 v2 布局，新增总览存档占用分析。
 
 ### 新增
 - **存档占用分析**：总览统计条新增「存储」chip——当前范围（所选工作区）会话存档总占用，只读统计不改任何数据；排序下拉新增「占用最大」，快速定位最占空间的会话
@@ -122,9 +124,10 @@
 **其他**
 - 缓存管理面板（索引 + 时间线分类清理，仅限插件私有目录）
 
-[Unreleased]: https://github.com/YeqingTang/dsh-session-flow/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/YeqingTang/dsh-session-flow/compare/v1.4.0...HEAD
 [0.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v0.1.0
 [1.0.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.0.0
 [1.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.1.0
 [1.2.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.2.0
 [1.3.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.3.0
+[1.4.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.0

@@ -3,6 +3,14 @@
 本插件所有显著变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.1] - 2026-09-13
+
+### 新增
+- **DSH 商店兼容性声明**：`package.json` 新增 `dsh.compatibility.dshReleases` 逐版本兼容矩阵（0.1.2-rc.1 兼容 / 0.1.3-alpha.1 未知 / 0.1.3-alpha.2 兼容），满足 DSH STORE 自动化上架契约
+
+### 变更
+- **浏览器端源码模块化 + 构建产物化**：客户端源码拆分至 `src/`（文案 / 样式 / 共享常量独立模块），发布产物 `lib/client.js` 改由 esbuild 打包压缩生成（附 sourcemap，`npm run build:client` 可复现）——运行行为不变，单文件体积 141KB（256KiB 自动审查上限以下）
+
 ## [1.4.0] - 2026-09-13
 
 适配 dsh v0.1.3 存档 v2 布局，新增总览存档占用分析。
@@ -124,10 +132,11 @@
 **其他**
 - 缓存管理面板（索引 + 时间线分类清理，仅限插件私有目录）
 
-[Unreleased]: https://github.com/YeqingTang/dsh-session-flow/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/YeqingTang/dsh-session-flow/compare/v1.4.1...HEAD
 [0.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v0.1.0
 [1.0.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.0.0
 [1.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.1.0
 [1.2.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.2.0
 [1.3.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.3.0
 [1.4.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.0
+[1.4.1]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.1

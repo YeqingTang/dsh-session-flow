@@ -1938,11 +1938,13 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
         // 双视图冗余（用户指定交互：点击=打开 dock+跳回对话）。
         h('button', {
           className: 'sf-btn',
+          disabled: dockBridge.available === false,
           onClick: () => {
             if (dockBridge.controller) dockBridge.controller.open()
-            if (props.embedded) activateChatTab()
+            // 只有真的并入成功才切回对话标签——否则点了没反应还把人从中栏踢走。
+            if (props.embedded && dockBridge.open) activateChatTab()
           },
-          title: STR.dockHint,
+          title: dockBridge.available === false ? STR.dockUnavailable : STR.dockHint,
         }, STR.dock),
         // M6 实时通道：进行中会话可实时查看（sessions.history → derive → 折叠视图）。
         props.connection !== undefined && h('button', {
@@ -3123,6 +3125,32 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
   // ── M12：详情并入右侧栏（details 槽位轻量视图）────────────────────
   // 随会话自动切换（槽位 session 作用域 key 重挂载）；数据复用 host get/getTurn；
   // 回合列表直接复用 TurnList（展开 → TimelineTurns 完整渲染）。
+  /** M12：右栏标签页里的会话流 body（dsh ≥ 0.1.5 的右栏标签页体系）。
+   * 只做三件事：把右栏注入的 hook（useTabInfo）转成 DetailsDockView 需要的 props；
+   * 把「退出并入」接到**本标签页自己的关闭动作**（tab.actions.close()，与右栏 chip 上
+   * 的 ✕ 同源，所以两者行为一致）；卸载时回落到插件侧的关闭状态——用户从右栏自己的 ✕
+   * 关掉本标签页时，插件侧的开/关标记要跟着回落，否则按钮状态会和右栏不一致。 */
+  function DockTabBody(props) {
+    const { sessionId, connection, onClose } = props
+    // useTabInfo 是右栏槽位注入的 hook 工厂，必须在组件渲染期调用。
+    const info = typeof props.useTabInfo === 'function' ? props.useTabInfo() : null
+    const actions = info !== null && info.tab !== undefined ? info.tab.actions : null
+    useEffect(() => () => {
+      if (dockBridge.open) {
+        dockBridge.open = false
+        for (const fn of dockBridge.listeners) fn()
+      }
+    }, [])
+    return h(DetailsDockView, {
+      sessionId,
+      connection,
+      onExit: () => {
+        try { if (actions !== null) actions.close() } catch (e) {}
+        if (typeof onClose === 'function') onClose()
+      },
+    })
+  }
+
   function DetailsDockView(props) {
     const { sessionId, connection, onExit } = props
     const [state, setState] = useState({ phase: 'loading', error: null, data: null })
@@ -3829,7 +3857,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
   }
 
   // ── 插件体 ─────────────────────────────────────────────────────────
-  const inject = ['sessions', 'connection', 'slots', 'layout', 'remote', 'remote.session']
+  const inject = ['sessions', 'connection', 'slots', 'remote', 'remote.session']
 
   function apply(ctx) {
     try {
@@ -3945,84 +3973,88 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
         }
       }
 
-      // M12：详情并入右侧栏 —— details 槽位动态占用（priority -1 低于官方 tool-details）。
-      // 并入开启时注册 + **打开官方 details 列（layout.openDetails——列默认宽度 0 不可见，
-      // plan-graph 同款；曾漏开列导致「无响应」，实测踩坑）**；退出/卸载注销 + closeDetails。
-      // 官方在会话切换时自动 closeDetails（无法阻止）——并入期间：
-      //  ① html 打 data-dsh-dock-active 标记 → CSS 禁用 grid 列宽过渡（切换无「关→开」动画）；
-      //  ② 高频守护（150ms）快速重开列 → 视觉上右栏内容直接刷新为新会话。
-      const layout = ctx.get('layout')
-      let detailsRegistration = null
-      let detailsGuard = null
-      const setDockActive = (on) => {
+      // M12：详情并入右侧栏 —— dsh ≥ 0.1.5 起官方移除了 details 槽位与
+      // layout.openDetails/closeDetails（Details 列被右栏标签页体系取代：
+      // rightbar → rightbar.session → sidebar.right.pane.tab；见官方 commit
+      // 7e017046ca「open file resources in the Sidebar and remove Details」）。
+      // 接入改走官方公开的两段式注册：
+      //   ① 向 sidebarRightTabs 注册一个 page 类型（不声明 patterns，按 kind 打开）；
+      //   ② 把 tab body 注册进 keyed 的 sidebar.right.pane.tab（key = 类型 id）。
+      // 打开用 sidebarRight.openTab——它内部会一并展开右栏列，所以旧版那套
+      // 「手动 openDetails + 150ms 守护重开列 + data-dsh-dock-active 关动画」的补偿
+      // 逻辑整体删除：列现在由 rightbar 自己管，会话切换也不再被强制关掉。
+      // 类型与槽位在 apply 时就注册（只是登记能力，不占列、不可见）；open 只负责开标签页。
+      const DOCK_KIND = 'session-flow'
+      const DOCK_ID = 'dsh-session-flow'
+      const sidebarRightTabs = ctx.get('sidebarRightTabs')
+      const sidebarRight = ctx.get('sidebarRight')
+      const dockAvailable = sidebarRightTabs !== undefined && sidebarRightTabs !== null
+        && typeof sidebarRightTabs.register === 'function'
+        && sidebarRight !== undefined && sidebarRight !== null
+        && typeof sidebarRight.openTab === 'function'
+      let dockTypeDispose = null
+      let dockBodyDispose = null
+      if (!dockAvailable) {
+        console.warn('[dsh-session-flow] 并入右栏不可用：未找到 sidebarRight / sidebarRightTabs 服务（需 dsh ≥ 0.1.5）')
+      } else {
         try {
-          if (on) document.documentElement.setAttribute('data-dsh-dock-active', '')
-          else document.documentElement.removeAttribute('data-dsh-dock-active')
-        } catch (e) {}
-      }
-
-      // M12×aionui：官方 details 把手在 5 轨 grid 下的位置补偿已由上游
-      // aionui-panel ≥0.2.0 接管（dsh-web-ui PR #311，applyGrid 每帧重算；
-      // 3 轨时退化为官方原值）。本插件过渡兼容层 detailsHandleCompat 已移除
-      // （2026-08-18，本机 aionui 0.2.0 实证含修复；旧版 aionui 请升级）。
-      const ensureColumn = () => {
-        if (dockBridge.open && layout !== undefined && typeof layout.openDetails === 'function') {
-          try { layout.openDetails() } catch (e) {}
+          dockTypeDispose = sidebarRightTabs.register({
+            id: DOCK_ID,
+            kind: DOCK_KIND,
+            // 站外类型用 extension 段位（可覆盖同 kind 的 builtin）。
+            priority: 'extension',
+            // 标签页 chip 的文案；未注册 .title 槽位时用它，开启时快照一次。
+            title: () => STR.entry,
+          })
+        } catch (error) {
+          console.error('[dsh-session-flow] sidebarRight tab type registration failed:', error)
+          dockTypeDispose = null
         }
-      }
-      const syncDetails = () => {
-        if (dockBridge.open && detailsRegistration === null && slots !== undefined && typeof slots.inject === 'function') {
+        if (dockTypeDispose !== null && slots !== undefined && typeof slots.inject === 'function') {
           try {
-            detailsRegistration = slots.inject('details', () => slots.register({
-              name: 'details',
-              priority: -1,
-            }, (props) => h(DetailsDockView, {
+            dockBodyDispose = slots.inject('sidebar.right.pane.tab', () => slots.register({
+              name: 'sidebar.right.pane.tab',
+              key: DOCK_ID,
+            }, (props) => h(DockTabBody, {
               sessionId: props ? props.sessionId : undefined,
+              useTabInfo: props ? props.useTabInfo : undefined,
               connection,
-              onExit: () => dockBridge.controller.close(),
+              onClose: () => { if (dockBridge.controller) dockBridge.controller.close() },
             })))
-            setDockActive(true)
-            ensureColumn()
           } catch (error) {
-            console.error('[dsh-session-flow] details dock registration failed:', error)
-            detailsRegistration = null
-          }
-        } else if (!dockBridge.open && detailsRegistration !== null) {
-          try { detailsRegistration() } catch (e) {}
-          detailsRegistration = null
-          setDockActive(false)
-          if (layout !== undefined && typeof layout.closeDetails === 'function') {
-            try { layout.closeDetails() } catch (e) {}
+            console.error('[dsh-session-flow] sidebarRight tab body registration failed:', error)
+            dockBodyDispose = null
           }
         }
+      }
+      dockBridge.available = dockAvailable
+      /** 退出并入：只回落插件侧状态——标签页本身由 DockTabBody 的 tab.actions.close() 关。 */
+      const resetDock = () => {
+        if (!dockBridge.open) return
+        dockBridge.open = false
+        for (const fn of dockBridge.listeners) fn()
       }
       dockBridge.controller = {
-        getSnapshot: () => ({ open: dockBridge.open }),
+        getSnapshot: () => ({ open: dockBridge.open, available: dockBridge.available }),
         subscribe: (fn) => {
           dockBridge.listeners.add(fn)
           return () => dockBridge.listeners.delete(fn)
         },
         open: () => {
-          if (!dockBridge.open) {
-            dockBridge.open = true
-            syncDetails()
-            // 会话切换时官方会自动 closeDetails —— 高频守护快速重开（无动画，内容直接刷新）。
-            if (detailsGuard === null) {
-              detailsGuard = setInterval(() => { ensureColumn() }, 150)
-            }
-            for (const fn of dockBridge.listeners) fn()
+          if (dockBridge.open) return
+          if (!dockAvailable) {
+            console.error('[dsh-session-flow] 并入右栏不可用：sidebarRight / sidebarRightTabs 服务缺失')
+            return
           }
-        },
-        close: () => {
-          if (dockBridge.open) {
+          dockBridge.open = true
+          try { sidebarRight.openTab(DOCK_KIND) } catch (error) {
+            console.error('[dsh-session-flow] sidebarRight.openTab failed:', error)
             dockBridge.open = false
-            syncDetails()
-            if (detailsGuard !== null) { clearInterval(detailsGuard); detailsGuard = null }
-            for (const fn of dockBridge.listeners) fn()
           }
+          for (const fn of dockBridge.listeners) fn()
         },
+        close: resetDock,
       }
-      syncDetails()
 
       // 点击侧边栏会话/工作区行 → 交还中栏给会话。
       const onClickSidebarRow = (event) => {
@@ -4063,15 +4095,14 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
       }
 
       const teardown = () => {
-        // M12：卸载时注销 details 槽位占用（恢复官方 tool-details）+ 关列 + 清守护 + 移除标记。
-        if (detailsRegistration) {
-          try { detailsRegistration() } catch (e) {}
-          detailsRegistration = null
+        // M12：卸载时注销右栏 tab body 与 tab 类型，把右栏交还官方原有内容。
+        if (dockBodyDispose) {
+          try { dockBodyDispose() } catch (e) {}
+          dockBodyDispose = null
         }
-        if (detailsGuard !== null) { clearInterval(detailsGuard); detailsGuard = null }
-        setDockActive(false)
-        if (layout !== undefined && typeof layout.closeDetails === 'function') {
-          try { layout.closeDetails() } catch (e) {}
+        if (dockTypeDispose) {
+          try { dockTypeDispose() } catch (e) {}
+          dockTypeDispose = null
         }
         dockBridge.open = false
         document.removeEventListener(ACTIVATE_EVENT, onActivate)

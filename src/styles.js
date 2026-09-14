@@ -282,9 +282,8 @@ import { VIEW_SELECTOR, ACTIVE_ATTR } from './shared.js'
     // T8-B 钉住提示条：琥珀色警示（直播会话 ≠ 当前会话）。
     `.dk-pinBar{flex:none;display:flex;align-items:center;gap:8px;padding:5px 8px;border:1px solid rgba(224,150,63,.45);background:rgba(224,150,63,.08);border-radius:8px}`,
     `.dk-pinText{flex:1;min-width:0;font-size:12px;color:#c07a2a}`,
-    // M12：并入期间禁用 layout grid 列宽过渡——官方会话切换会 closeDetails（宽 360→0），
-    // 守护重开（0→360）若带过渡动画会产生「关→开」闪烁；禁用后切换直接刷新内容（实测踩坑）。
-    `html[data-dsh-dock-active] [class*=frame],html[data-dsh-dock-active] [data-side=details]{transition:none!important}`,
+    // （M12：旧版「并入右栏」用 data-dsh-dock-active 关掉 grid 列宽过渡；dsh ≥ 0.1.5 的
+    //  右栏标签页体系由 rightbar 自己管列宽，该标记与对应规则一并移除。）
     // ── M5 会话摘要卡 ──
     `.sf-summaryCard{flex:none;display:flex;flex-direction:column;gap:5px;border:1px solid var(--dsw-alias-border-l2,#e5e5e5);border-radius:10px;background:var(--dsw-specific-input-major,#fafafa);padding:9px 12px;font-size:12px}`,
     `.sf-summaryHead{display:flex;align-items:center;gap:8px}`,

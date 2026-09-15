@@ -3,6 +3,11 @@
 本插件所有显著变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.2] - 2026-09-14
+
+### 修复
+- **适配 dsh v0.1.5 存档 v3 布局**：v0.1.5 起会话存档迁移为 `session.v3.jsonl.zstd`——v3 为唯一持续写入的活文件，旧格式文件冻结在迁移时刻；且 header 行拍平为顶层字段（无 data 信封），事件行信封不变。旧版只认 v2——升级后新建的会话完全不可见、迁移老会话读到冻结旧数据。现最高优先读取 v3 存档，header 字段读取兼容「拍平 / 信封」两种位置
+
 ## [1.4.1] - 2026-09-13
 
 ### 新增
@@ -132,7 +137,7 @@
 **其他**
 - 缓存管理面板（索引 + 时间线分类清理，仅限插件私有目录）
 
-[Unreleased]: https://github.com/YeqingTang/dsh-session-flow/compare/v1.4.1...HEAD
+[Unreleased]: https://github.com/YeqingTang/dsh-session-flow/compare/v1.4.2...HEAD
 [0.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v0.1.0
 [1.0.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.0.0
 [1.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.1.0
@@ -140,3 +145,4 @@
 [1.3.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.3.0
 [1.4.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.0
 [1.4.1]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.1
+[1.4.2]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.2

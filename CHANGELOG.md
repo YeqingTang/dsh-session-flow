@@ -3,6 +3,19 @@
 本插件所有显著变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.3] - 2026-09-29
+
+### 修复
+- **适配 dsh v0.1.7 存档 v4 布局**：v0.1.7 起会话存档迁移为 `session.v4.jsonl.zstd`——旧版只认 v3/v2/v1，纯 v4 会话的详情/重命名/检索全部 404「not found in archives」。现最高优先读取 v4 存档；`tool/result` 错误标记兼容 v4 新口径（`isError` 从 tool-result 包装块内提升到 `message` 顶层，摘要统计与时间线双消费点同步适配——修复前 v4 存档的工具错误数漏报为 0）；索引格式升级，首次打开自动全量重扫一次
+- **适配 dsh v0.1.7 设置体系重构**：v0.1.7 移除旧 `settings.register` 命名空间 API，改为「插件导出 cordis `Config` 即官方设置页 + `.volatile()` 字段编辑热提交进运行中的 `ctx.config`」。旧版每次启动必抛「settings registration failed」（插件自身 catch 不致命，但卡死阈值等设置永远停在默认值、设置页改动不生效）。现新旧双模型兼容——新模型从 `ctx.config` 同步并监听 `loader/volatile-update` 热更新；旧模型在 ≤0.1.6 宿主照常工作，0.1.7+ 静默跳过不再报错。10 个设置项现出现在官方设置界面 `dsh-session-flow` 条目下，编辑即时生效
+
+### 变更
+- **schema 依赖更换**：`schemastery` → `@deepseek-ai/schemastery`（上游无 `.volatile()` 方法，官方分叉才提供；volatile 字段解析值为 `{ get() }` 活引用而非裸值，消费侧统一 `readLive` 解引用兼容两种形态）
+- **DSH 商店兼容性声明**：`dshReleases` 矩阵补 0.1.5-alpha.1 / 0.1.5-rc.2 / 0.1.7-alpha.2 / 0.1.7-rc.2（兼容）与 0.2.0-rc.2（未知）
+
+### 已知遗留
+- 插件自带客户端设置页（设置弹窗「会话流」tab）绑定旧设置桥命名空间，在 0.1.7+ 可能不可用——请改用官方设置界面的 `dsh-session-flow` 条目（≤0.1.6 宿主上该 tab 照常可用）
+
 ## [1.4.2] - 2026-09-14
 
 ### 修复
@@ -137,7 +150,7 @@
 **其他**
 - 缓存管理面板（索引 + 时间线分类清理，仅限插件私有目录）
 
-[Unreleased]: https://github.com/YeqingTang/dsh-session-flow/compare/v1.4.2...HEAD
+[Unreleased]: https://github.com/YeqingTang/dsh-session-flow/compare/v1.4.3...HEAD
 [0.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v0.1.0
 [1.0.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.0.0
 [1.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.1.0
@@ -146,3 +159,4 @@
 [1.4.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.0
 [1.4.1]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.1
 [1.4.2]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.2
+[1.4.3]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.3

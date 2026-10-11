@@ -3,6 +3,15 @@
 本插件所有显著变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.4] - 2026-10-11
+
+### 修复
+- **适配 dsh v0.2.0 会话面重构**：0.2.0 的 `ctx.sessions` 只剩 `retain/using/retainInfo/refreshProjections/search/fork/scope/binding` + `list`，`sessions.open(id)` 已移除——旧版点「打开原生会话 / 检索结果跳转」直接抛错。现会话打开走双面：`ctx.uiWorkspace.openSession(id)`（0.2.0 官方口径）优先，旧宿主回退 `sessions.open`，调用点统一经 `sfOpenSession`（`openSession` prop 逐层透传，模块级 `sfOpenerRef` 兜底）。`sessions.list.getSnapshot/subscribe`、`conversation.view` / `conversation.session.header.actions` / `settings.section` 槽位、`webServer.register`、`llm.listProviders/listModels/stream`（text-delta/reasoning-delta/finish 协议）、`remote.session.page`（address/throughSeq 口径）、`Config + loader/volatile-update` 设置热更新在 0.2.0 下实测均未变，无需改动；`connection.api.*` 旧面在 0.2.0 已消失，但本插件本就 remote 优先、旧面只当回退，不受影响
+- **存档 v5 前瞻占位**：0.2.0 实测仍写 `session.v4.jsonl.zstd`；`sessionFileOf` 新增 v5 最高优先槽位（行信封不变则零改动直接兼容）
+
+### 变更
+- **DSH 商店兼容性声明**：`dshReleases` 矩阵中 0.2.0-rc.2 由「未知」改为「兼容」
+
 ## [1.4.3] - 2026-09-29
 
 ### 修复

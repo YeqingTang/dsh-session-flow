@@ -29,8 +29,10 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
   const PANEL_NAME = 'sessionflow'
   // 会话面板容器选择器：dsh v0.1.2 起官方移除 data-pane="conversation"（会话流
   // 重构进 dsh-client-ui-chat），兜底命中布局中栏（CenterColumn，类名含 centerCol
-  // 哈希后缀稳定片段）。工作台/标签切换/钢琴键定位共用此锚。
-  const CONVERSATION_SELECTOR = '[data-pane="conversation"], [class*=centerCol]'
+  // 哈希后缀稳定片段）。dsh 0.2.0 起 CenterColumn 也被拆掉，中栏正文容器改为
+  // dsh-client-ui-conversation 的 [data-conversation-region="chat"]（稳定 data 钩，
+  // 替代 centerCol 成为第二优先级）。工作台/标签切换/钢琴键定位共用此锚。
+  const CONVERSATION_SELECTOR = '[data-pane="conversation"], [data-conversation-region="chat"], [class*=centerCol]'
   const SIDEBAR_ROW_SELECTOR = '[class*="sessionRow"], [class*="projectRow"], [class*="searchResultRow"], [class*="searchResultWorkspace"], [class*="newSession"]'
   const ACTIVE_WINDOW_MS = 15 * 60 * 1000 // 最近 15 分钟有事件 → 视为进行中（归档/总览徽标用）
 
@@ -430,6 +432,34 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
     }
     return null
   }
+  // ── v0.2.0 兼容：会话打开双面 ─────────────────────
+  // 旧面：sessions.open(id)（≤0.1.x；0.2.0 会话面只剩 retain/using/list，开会话
+  // 已移除）。新面：ctx.uiWorkspace.openSession(id)（0.2.0 官方会话切换口径，
+  // conversation 内 workspaceNavigation.openSession 同款）。apply 时探测：
+  // 有 uiWorkspace 用新面，旧宿主回退旧面；调用点统一走 sfOpenSession。
+  const sfOpenerRef = { current: null }
+  const sfBuildOpener = (ctx, sessions) => {
+    let nav = null
+    try { nav = ctx && typeof ctx.get === 'function' ? ctx.get('uiWorkspace') : null } catch (e) { nav = null }
+    const canNav = nav !== null && nav !== undefined && typeof nav.openSession === 'function'
+    const canLegacy = sessions !== null && sessions !== undefined && typeof sessions.open === 'function'
+    return (sessionId) => {
+      if (canNav) return nav.openSession(sessionId)
+      if (canLegacy) return sessions.open(sessionId)
+      throw new Error('no session opener (uiWorkspace.openSession/sessions.open both missing)')
+    }
+  }
+  const sfOpenSession = (props, sessionId) => {
+    const fn = (props && typeof props.openSession === 'function')
+      ? props.openSession
+      : (sfOpenerRef.current || null)
+    if (fn) return fn(sessionId)
+    const legacy = props && props.sessions && typeof props.sessions.open === 'function'
+      ? props.sessions.open.bind(props.sessions)
+      : null
+    if (legacy) return legacy(sessionId)
+    throw new Error('no session opener')
+  }
   // v0.1.2 兼容（一）：sessions.history 返回值从 {events} 改为 {records, hasMore}
   //（记录 = {type:'event', event} 或 chunk 行 {type:'chunks', event:{type:'chunkrow/…'}}）。
   // 旧版 {events} 每项亦可能包 {event}。统一解析为事件数组；丢弃 chunkrow 合成
@@ -747,7 +777,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
         localStorage.setItem(storeKey, JSON.stringify(st))
         localStorage.setItem(PENDING_SEARCH_KEY, JSON.stringify({ sessionId: hit.sessionId, query: query.trim() }))
       } catch (e) {}
-      try { props.sessions.open(hit.sessionId) } catch (e) { console.warn('[dsh-session-flow] open failed', hit.sessionId, e) }
+      try { sfOpenSession(props, hit.sessionId) } catch (e) { console.warn('[dsh-session-flow] open failed', hit.sessionId, e) }
       // 关闭工作台（中栏交还给会话），用户直接看到目标会话的会话流标签页——
       // 否则工作台仍覆盖中栏，需手动点侧边栏才可见（实测踩坑）。
       try { if (props.onClose) props.onClose() } catch (e) {}
@@ -1557,7 +1587,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
 
     const jumpNative = () => {
       try {
-        props.sessions.open(session.id)
+        sfOpenSession(props, session.id)
         // 打开原生会话后收起会话流视图，交还中栏给对话界面。
         props.onClose()
       } catch (error) {
@@ -2428,7 +2458,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
   // ── M11：钢琴键会话快切（会话页左侧常驻竖条）─────────────────────
   // 数据：ctx.sessions.list（ObservableSnapshot 订阅）→ 过滤（排除 subagent、隐藏 blank）
   // → 排序（updatedAt 降序，收藏置顶）→ 分组（连续 cwd 同段，段间黑白交替）。
-  // 点击 sessions.open(id) 切换；会话切换由框架重挂载会话组件（M7 已验证）。
+  // 点击 sfOpenSession(id) 切换（0.2.0 走 uiWorkspace.openSession，旧宿主走 sessions.open）；会话切换由框架重挂载会话组件（M7 已验证）。
   // 错误角标：挂载时拉一次 host list 索引（toolErrors 映射）。
   // 预览卡：hover 200ms 防抖 → host get 单个会话（缓存秒回）→ fixed 浮层（不裁剪）。
   // 交互：滚轮/箭头滚动窗口（默认 15 键，兼容大量会话）、键盘 ↑↓/Enter、
@@ -3791,7 +3821,14 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
     let waitObserver = null
 
     const ensure = () => {
-      if (container !== undefined) return
+      // 自愈：中栏容器被 React 重建（会话切换/视图卸载）时旧容器脱离，
+      // 必须丢弃并重新挂载，否则面板永远不再出现（0.2.0 高频触发）。
+      if (container !== undefined) {
+        if (container.isConnected) return
+        try { if (root) root.unmount() } catch (e) {}
+        root = undefined
+        container = undefined
+      }
       const column = document.querySelector(CONVERSATION_SELECTOR)
       if (column === null) return
       container = document.createElement('div')
@@ -3845,6 +3882,8 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
       const connection = ctx.get('connection')
       // v0.1.2 RPC 双面适配（remote.session 新面优先，connection 旧面回退）。
       sfRemoteRef.current = sfBuildRemote(ctx, connection)
+      // v0.2.0 会话打开双面（uiWorkspace.openSession 新面优先，sessions.open 旧面回退）。
+      sfOpenerRef.current = sfBuildOpener(ctx, sessions)
       // 设置控制器引用：settings.section 注册块内创建，挂载钢琴键/导航增强层时
       // 传给 NavRoot 做设置变更即时切换（不可用则为 null，走默认值）。
       let sfSettingsCtrl = null
@@ -3896,6 +3935,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
             sessionId: props ? props.sessionId : undefined,
             sessions,
             connection,
+            openSession: sfOpenerRef.current,
             onOpenWorkbench: () => controller.open(),
           })))
         } catch (error) {
@@ -3913,6 +3953,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
             sessionId: slotProps ? slotProps.sessionId : undefined,
             sessions,
             connection,
+            openSession: sfOpenerRef.current,
             onOpen: () => {
               const sid = slotProps && slotProps.sessionId
               if (sid) workbenchBridge.open(sid)

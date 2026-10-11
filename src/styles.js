@@ -45,6 +45,7 @@ import { VIEW_SELECTOR, ACTIVE_ATTR } from './shared.js'
   const STYLE = [
     `[data-pane=conversation]{position:relative}`,
     `[class*=centerCol]{position:relative}`,
+    `[data-conversation-region=chat]{position:relative}`,
     `.sf-rail-conclusion{margin-top:8px;padding-top:8px;border-top:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.25));font-size:12px;line-height:1.5;color:var(--dsw-alias-label-primary,#222)}`,
     `.sf-turnMeta{display:flex;flex-wrap:wrap;gap:3px 10px;font-size:11px;font-weight:600;color:var(--dsw-alias-label-secondary,#555)}`,
     `.sf-turnMetaChip{display:inline-flex;align-items:center;gap:3px}`,
@@ -53,7 +54,7 @@ import { VIEW_SELECTOR, ACTIVE_ATTR } from './shared.js'
     `.sf-rail-conclusionTools{margin-top:3px;font-size:11px;color:var(--dsw-alias-label-tertiary,#999);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}`,
     `${VIEW_SELECTOR}{z-index:60;background:var(--dsw-alias-bg-base,#fff);display:none!important;position:absolute;inset:0;overflow:hidden}`,
     `html[${ACTIVE_ATTR}]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) ${VIEW_SELECTOR}{display:block!important}`,
-    `html[${ACTIVE_ATTR}]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [data-pane=conversation]>:not(${VIEW_SELECTOR}),html[${ACTIVE_ATTR}]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [class*=centerCol]>:not(${VIEW_SELECTOR}){display:none!important}`,
+    `html[${ACTIVE_ATTR}]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [data-pane=conversation]>:not(${VIEW_SELECTOR}),html[${ACTIVE_ATTR}]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [class*=centerCol]>:not(${VIEW_SELECTOR}),html[${ACTIVE_ATTR}]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [data-conversation-region=chat]>:not(${VIEW_SELECTOR}){display:none!important}`,
     `.sf-entry{width:100%;height:32px;color:var(--dsw-alias-label-secondary,#666);cursor:pointer;white-space:nowrap;background:0 0;border:none;border-radius:8px;align-items:center;gap:8px;padding:0 12px;font-size:13px;display:flex}`,
     `.sf-entry:hover{background:var(--dsw-specific-sidebar-nav-item-hover,rgba(0,0,0,.06));color:var(--dsw-alias-label-primary,#222)}`,
     `.sf-entry[data-active]{background:var(--dsw-specific-sidebar-nav-item-active,rgba(0,0,0,.1));color:var(--dsw-alias-label-primary,#222);font-weight:600}`,

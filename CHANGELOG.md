@@ -3,6 +3,11 @@
 本插件所有显著变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.5] - 2026-10-13
+
+### 修复
+- **修复 dsh 0.2.0 下钢琴键轮次悬浮条 / 官方 rail 增强层 / 会话健康芯片集体静默失效**：v0.2.0 把 `sessions.list.getSnapshot()` 快照从「直挂 `current`」改为 `{ids, byId, phase, projectionsBySession}`——旧代码读到 `current = undefined` → 当前会话 id 为空 → 条目永远空集、悬浮条按「少于 2 轮」规则隐藏（全程无报错，纯静默）。`currentSessionIdOf()` 改双口径：旧宿主读 `snap.current`；0.2.0+ 按官方 `ui-session.publishMain` 同算法取主视图保留者（`byId` 中 `retainedBy.mainView > 0` 的候选）。三处消费点（TurnKeys / RailEnhancer / SessionHealthChip）统一收敛到该辅助函数。根因定位经浏览器内探针实测（快照键清单 + 宿主 `get` 接口端到端响应）
+
 ## [1.4.4] - 2026-10-12
 
 ### 修复

@@ -486,7 +486,16 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
   const currentSessionIdOf = (sessions) => {
     try {
       const snap = sessions && sessions.list && typeof sessions.list.getSnapshot === 'function' ? sessions.list.getSnapshot() : null
-      return snap && snap.current ? snap.current : undefined
+      if (!snap) return undefined
+      if (snap.current) return snap.current // dsh ≤0.1.x：快照直挂 current
+      // dsh 0.2.0+：快照改 {ids, byId, phase, projectionsBySession}（current 移除）——
+      // 当前会话 = 主视图保留者（与官方 ui-session publishMain 同算法：retainedBy.mainView > 0）。
+      const byId = snap.byId
+      if (byId && typeof byId === 'object') {
+        const hit = Object.values(byId).find((c) => c && ((c.retainedBy && c.retainedBy.mainView) ?? 0) > 0)
+        if (hit && hit.id) return hit.id
+      }
+      return undefined
     } catch (e) { return undefined }
   }
   // 【临时诊断】chipDbg 已于 v1.3.0 验收后撤除；probe error 静默（与总览探测同口径）。
@@ -2611,13 +2620,8 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
       setScrollPos(entries.length - WINDOW)
     }, [entries])
 
-    // 当前会话 id（仅取 current，不展示跨会话列表）。
-    const currentId = (() => {
-      try {
-        const s = sessions && sessions.list && typeof sessions.list.getSnapshot === 'function' ? sessions.list.getSnapshot() : null
-        return s && s.current ? s.current : null
-      } catch (e) { return null }
-    })()
+    // 当前会话 id（仅取 current，不展示跨会话列表）。双口径见 currentSessionIdOf（0.2.0 适配）。
+    const currentId = currentSessionIdOf(sessions) ?? null
 
     // 条目数据：host get lightTurns 全量用户轮次（含往期，不受 DOM 虚拟列表窗口限制）。
     // 轮询降载（PERF-ANALYSIS §4.1）：大会话 get 每轮 ~383ms（缓存 JSON.parse）——
@@ -3435,12 +3439,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
       return undefined
     }, [sessions])
 
-    const currentId = (() => {
-      try {
-        const s = sessions && sessions.list && typeof sessions.list.getSnapshot === 'function' ? sessions.list.getSnapshot() : null
-        return s && s.current ? s.current : null
-      } catch (e) { return null }
-    })()
+    const currentId = currentSessionIdOf(sessions) ?? null
 
     // 条目数据：host get lightTurns（每轮一条，对齐官方 rail item 粒度）。
     // 轮询节奏同钢琴键：DOM 变化切 3s 高频，空闲 15s 兜底。

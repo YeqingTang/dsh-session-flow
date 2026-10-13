@@ -163,7 +163,7 @@
 **其他**
 - 缓存管理面板（索引 + 时间线分类清理，仅限插件私有目录）
 
-[Unreleased]: https://github.com/YeqingTang/dsh-session-flow/compare/v1.4.4...HEAD
+[Unreleased]: https://github.com/YeqingTang/dsh-session-flow/compare/v1.4.5...HEAD
 [0.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v0.1.0
 [1.0.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.0.0
 [1.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.1.0
@@ -174,3 +174,4 @@
 [1.4.2]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.2
 [1.4.3]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.3
 [1.4.4]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.4
+[1.4.5]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.5

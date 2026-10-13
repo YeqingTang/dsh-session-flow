@@ -12,3 +12,8 @@ docs/
 # 导出产物
 *.zip
 .npmrc
+
+# 发布过程产物（npm pack 缓存/输出/tgz）
+.npm-tmp-cache/
+.npm-pub-out.txt
+*.tgz

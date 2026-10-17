@@ -3,6 +3,12 @@
 本插件所有显著变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.9] - 2026-10-18
+
+### 修复
+- **DSH STORE 目录里 `dshReleases` 全 unknown 的根因修复**：商店扫描器（`check-plugin-submission.mjs` 的 `inferredCompatibility`）会拿每个声明的 release 再按 `engines.dsh` / `@deepseek-ai/dsh-*` peer 范围复核；我们的 dsh peer 范围是 `"*"`，而商店的 `parseDshRange("*")` 不识别（只支持 `>= <= > < ^ ~ =`）→ 返回 unknown → **所有 release 状态被统一下调为 unknown**（不是我们的矩阵写错，是范围不可解析）。现清单新增显式 `engines.dsh: ">=0.1.2-rc.1 <0.3.0"`，并把 dsh-* peer 改为同一范围；商店将按范围复核并保留我们逐版本 `dshReleases` 的真实状态
+- **运行时兼容判定改为 `engines.dsh` 单独决定**（dsh 官方语义：有 engines.dsh 时忽略 dsh-* peer），对已支持版本（0.1.2-rc.1 ~ 0.2.1-rc.2）行为不变
+
 ## [1.4.8] - 2026-10-18
 
 ### 文档
@@ -188,7 +194,7 @@
 **其他**
 - 缓存管理面板（索引 + 时间线分类清理，仅限插件私有目录）
 
-[Unreleased]: https://github.com/YeqingTang/dsh-session-flow/compare/v1.4.8...HEAD
+[Unreleased]: https://github.com/YeqingTang/dsh-session-flow/compare/v1.4.9...HEAD
 [0.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v0.1.0
 [1.0.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.0.0
 [1.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.1.0
@@ -203,3 +209,4 @@
 [1.4.6]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.6
 [1.4.7]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.7
 [1.4.8]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.8
+[1.4.9]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.9

@@ -1,7 +1,7 @@
 {
   "name": "dsh-session-flow",
   "description": "DSH 会话回顾与归档插件：可折叠信息流 + 会话级汇总——总览工作台、折叠时间线、血缘树、双模式摘要、全文检索、ZIP 导出、实时跟踪、会话重命名（官方数据源对齐）、健康监控",
-  "version": "1.4.8",
+  "version": "1.4.9",
   "type": "module",
   "main": "lib/host.js",
   "exports": {
@@ -35,7 +35,8 @@
     "url": "https://github.com/YeqingTang/dsh-session-flow.git"
   },
   "engines": {
-    "node": "^22.19.0 || >=24.0.0"
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.1.2-rc.1 <0.3.0"
   },
   "dsh": {
     "bundle": {
@@ -55,7 +56,8 @@
         "0.1.7-rc.2": "compatible",
         "0.2.0-rc.2": "compatible",
         "0.2.1-rc.2": "compatible"
-      }
+      },
+      "dsh": ">=0.1.2-rc.1 <0.3.0"
     }
   },
   "dependencies": {
@@ -63,8 +65,8 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/dsh-client-connection": "*",
-    "@deepseek-ai/dsh-client-runtime": "*",
+    "@deepseek-ai/dsh-client-connection": ">=0.1.2-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-client-runtime": ">=0.1.2-rc.1 <0.3.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },

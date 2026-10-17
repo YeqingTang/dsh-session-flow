@@ -659,9 +659,13 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
     const [sort, setSort] = useState('recent') // 默认：最近运行（最后活动时间）
     const [showEmpty, setShowEmpty] = useState(false) // 默认隐藏空会话
     const [showIssues, setShowIssues] = useState(false) // 问题速览：只看有错误记录的会话
+    // P1-A：文件↔会话反查（总览）：输入路径片段 → 列出编辑过匹配路径的会话，
+    // 按文件分组、会话按时间倒序；同一文件被 ≥2 个会话修改时标记 ⚠ 多会话。
+    // 数据源 = list 响应条目上的 editedFiles（索引字段，0.1.7+ 重扫补齐）。
+    const [fileMode, setFileMode] = useState(false)
+    const [fileQuery, setFileQuery] = useState('')
     // 缓存管理面板。
     const [cacheOpen, setCacheOpen] = useState(false)
-    const [cacheInfo, setCacheInfo] = useState(null)
     const [cacheBusy, setCacheBusy] = useState(false)
     const [cacheMsg, setCacheMsg] = useState('')
     // 方向 A：跨会话全文检索（防抖 500ms；AbortController 取消；结果区渲染）。
@@ -938,6 +942,27 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
     }, [state.data, wsFilter])
 
     const wsNames = ((state.data && state.data.workspaces) || []).map((g) => g.name)
+    // P1-A 文件反查结果（按文件分组；会话行内按时间倒序；组按最新活动倒序；封顶 50 组）。
+    const fileResults = useMemo(() => {
+      if (!fileMode || fileQuery.trim().length < 2) return []
+      const q = fileQuery.trim().toLowerCase()
+      const map = new Map()
+      for (const g of (state.data && state.data.workspaces) || []) {
+        for (const s of g.sessions || []) {
+          for (const p of s.editedFiles || []) {
+            if (p.toLowerCase().includes(q)) {
+              if (!map.has(p)) map.set(p, [])
+              map.get(p).push({ s, ws: g })
+            }
+          }
+        }
+      }
+      return [...map.entries()].map(([file, rows]) => ({
+        file,
+        rows: rows.sort((a, b) => (b.s.lastEventTime || 0) - (a.s.lastEventTime || 0)),
+        latest: Math.max(...rows.map((r) => r.s.lastEventTime || 0)),
+      })).sort((a, b) => b.latest - a.latest).slice(0, 50)
+    }, [state.data, fileMode, fileQuery])
     // 各工作区的会话计数（含空会话，反映磁盘全貌）。
     const wsCounts = new Map(((state.data && state.data.workspaces) || []).map((g) => [g.name, g.sessionCount]))
     const totalCount = ((state.data && state.data.workspaces) || []).reduce((a, g) => a + g.sessionCount, 0)
@@ -968,6 +993,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
         h('button', { className: 'sf-btn', onClick: rescan, disabled: state.phase === 'loading' },
           state.phase === 'loading' ? STR.scanning : STR.rescan),
         h('button', { className: 'sf-btn' + (cacheOpen ? ' sf-btnActive' : ''), onClick: () => setCacheOpen(!cacheOpen) }, STR.cache),
+        h('button', { className: 'sf-btn' + (fileMode ? ' sf-btnActive' : ''), onClick: () => setFileMode(!fileMode), title: STR.fileLookupHint }, STR.fileLookup),
         h('button', { className: 'sf-btn', onClick: props.onClose }, '✕ ' + STR.close),
       ),
       // 方向 A：跨会话全文检索结果区（防抖触发；与元数据筛选结果分区展示）。
@@ -991,7 +1017,30 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
           ),
         ),
       ),
-      // 缓存管理面板：仅本插件缓存，查看体积 + 分类清理（清理后自动重建，无需重启）。
+      // P1-A：文件反查面板（输入路径片段 → 编辑过它的会话；⚠ 标记多会话改同一文件）。
+      fileMode && h('div', { className: 'sf-filePanel' },
+        h('div', { className: 'sf-fulltextHead' },
+          h('span', { className: 'sf-fulltextTitle' }, STR.fileLookup),
+          h('input', {
+            className: 'sf-input', style: { flex: '1 1 200px', minWidth: 160 },
+            placeholder: STR.fileLookupPlaceholder, value: fileQuery,
+            onChange: (e) => setFileQuery(e.target.value),
+          }),
+        ),
+        fileQuery.trim().length < 2 && h('div', { className: 'sf-muted' }, STR.fileLookupHint),
+        fileQuery.trim().length >= 2 && fileResults.length === 0 && h('div', { className: 'sf-hint' }, STR.fileLookupNone),
+        fileResults.map((group) => group.rows.map((row) =>
+          h('div', {
+            key: group.file + ':' + row.s.id,
+            className: 'sf-fileRow',
+            onClick: () => props.onOpen(row.s),
+          },
+            h('span', { className: 'sf-filePath', title: group.file }, group.file),
+            group.rows.length > 1 && h('span', { className: 'sf-fileMulti', title: STR.fileLookupMulti }, '⚠ ' + group.rows.length),
+            h('span', { className: 'sf-fileName' }, row.s.userTitle || row.s.title || STR.unknownTitle),
+            h('span', { className: 'sf-muted' }, row.ws.label + ' · ' + fmtTime(row.s.lastEventTime)),
+          ))),
+      ),
       cacheOpen && h('div', { className: 'sf-cachePanel' },
         h('div', { className: 'sf-muted', style: { flex: 'none' } }, STR.cacheHint),
         h('div', { className: 'sf-cacheRow' },
@@ -1663,6 +1712,8 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
     // 统计条展开态与定位游标。
     const [statsExpanded, setStatsExpanded] = useState(false)
     const toolCursor = useRef(new Map())
+    // P1-A：变更清单折叠态（默认收拢；无变更不渲染）。
+    const [changesOpen, setChangesOpen] = useState(false)
 
     // ── M6 实时通道：connection.api.sessions.history → host derive → 完整折叠视图 ──
     // 与 M4 子代理桥同一数据源形态（events 数组）；轮询刷新仅实时模式激活时进行。
@@ -2047,6 +2098,39 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
               h('span', { className: 'sf-statCount err' }, sessionInfo.toolErrors),
             ),
           ),
+          // P1-A 变更清单：本会话写入/修改了哪些文件、跑了哪些命令（默认收拢；
+          // 回合号点击 → 展开并定位该回合）。
+          (() => {
+            const ch = (data.session && data.session.changes) || null
+            if (!ch) return null
+            const total = (ch.writes || []).length + (ch.edits || []).length + (ch.commands || []).length
+            if (total === 0) return null
+            const group = (title, items, isCommand) => (
+              items.length > 0 && h('div', { className: 'sf-changesGroup' },
+                h('div', { className: 'sf-changesGroupTitle' }, title + '（' + items.length + '）'),
+                items.map((item, i) => h('div', { key: i, className: 'sf-changesRow' },
+                  h('span', { className: 'sf-changesPath', title: isCommand ? item.command : item.path }, isCommand ? item.command : item.path),
+                  typeof item.turn === 'number' && h('button', {
+                    className: 'sf-changesTurn',
+                    title: 'T' + item.turn,
+                    onClick: () => scrollToMsg(item.turn, null),
+                  }, 'T' + item.turn),
+                )),
+              )
+            )
+            return h('div', { className: 'sf-changes', style: { flex: 'none' } },
+              h('button', { className: 'sf-changesToggle', onClick: () => setChangesOpen(!changesOpen) },
+                (changesOpen ? '▾ ' : '▸ ') + STR.changes +
+                ' · ' + STR.changeWriteGroup + ' ' + (ch.writes || []).length +
+                ' · ' + STR.changeEditGroup + ' ' + (ch.edits || []).length +
+                ' · ' + STR.changeCmdGroup + ' ' + (ch.commands || []).length),
+              changesOpen && h('div', { className: 'sf-changesBody' },
+                group(STR.changeWriteGroup, ch.writes || []),
+                group(STR.changeEditGroup, ch.edits || []),
+                group(STR.changeCmdGroup, ch.commands || [], true),
+              ),
+            )
+          })(),
           // M5 会话摘要卡：规则摘要实时组装 + LLM 摘要（DSH 模型通道，索引缓存）。
           (ruleGoal || ruleConclusion || ruleTools) && h('div', { className: 'sf-summaryCard' },
             h('div', { className: 'sf-summaryHead' },

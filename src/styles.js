@@ -261,6 +261,23 @@ import { VIEW_SELECTOR, ACTIVE_ATTR } from './shared.js'
     `.sf-fulltextHitTitle{display:flex;align-items:center;gap:8px;min-width:0}`,
     `.sf-fulltextName{flex:1;min-width:0;font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary,#222)}`,
     `.sf-fulltextCount{flex:none;border-radius:999px;background:rgba(90,140,255,.15);color:#4a7dff;font-size:10px;line-height:15px;min-width:18px;text-align:center;padding:0 5px;font-weight:700}`,
+    // P1-A 变更清单（详情页折叠区）+ 文件反查（总览面板）。
+    `.sf-changes{flex:none;border:1px solid rgba(90,140,255,.25);background:rgba(90,140,255,.04);border-radius:10px;padding:6px 10px;display:flex;flex-direction:column;gap:4px}`,
+    `.sf-changesToggle{align-self:flex-start;background:none;border:none;cursor:pointer;font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary,#222);padding:2px 0;display:inline-flex;align-items:center;gap:6px}`,
+    `.sf-changesToggle:hover{color:#4a7dff}`,
+    `.sf-changesBody{display:flex;flex-direction:column;gap:6px;max-height:240px;overflow:auto}`,
+    `.sf-changesGroup{display:flex;flex-direction:column;gap:2px}`,
+    `.sf-changesGroupTitle{font-size:11px;font-weight:700;color:var(--dsw-alias-label-secondary,#555)}`,
+    `.sf-changesRow{display:flex;align-items:center;gap:8px;min-width:0;font-size:11px;font-family:ui-monospace,Consolas,monospace;color:var(--dsw-alias-label-primary,#222)}`,
+    `.sf-changesPath{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left}`,
+    `.sf-changesTurn{flex:none;cursor:pointer;background:rgba(90,140,255,.12);color:#4a7dff;border:none;border-radius:6px;padding:0 6px;font-size:10px;line-height:16px}`,
+    `.sf-changesTurn:hover{background:rgba(90,140,255,.25)}`,
+    `.sf-filePanel{flex:none;border:1px solid rgba(90,140,255,.3);background:rgba(90,140,255,.05);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:4px;max-height:280px;overflow:auto}`,
+    `.sf-fileRow{display:flex;align-items:center;gap:8px;min-width:0;padding:3px 6px;border-radius:6px;cursor:pointer;font-size:12px;color:var(--dsw-alias-label-primary,#222)}`,
+    `.sf-fileRow:hover{background:rgba(90,140,255,.1)}`,
+    `.sf-filePath{flex:none;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left;font-family:ui-monospace,Consolas,monospace;font-weight:600}`,
+    `.sf-fileName{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}`,
+    `.sf-fileMulti{flex:none;font-size:10px;color:#b45309;background:rgba(217,119,6,.12);border-radius:999px;padding:0 6px;line-height:16px;font-weight:700}`,
     `.sf-fulltext .sf-muted{font-size:11px;color:var(--dsw-alias-label-secondary,#666)}`,
     // M12：详情并入右侧栏（details 槽位轻量视图）。
     // 头部布局：标题+按钮**聚左**，spacer 吃掉右侧余量——彻底规避右上角

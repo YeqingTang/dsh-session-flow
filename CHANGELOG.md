@@ -3,6 +3,11 @@
 本插件所有显著变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.8] - 2026-10-18
+
+### 文档
+- **README 补齐商店合规信息**（中/英双份）：新增「外部依赖与运行条件」（运行环境、唯一运行依赖 `@deepseek-ai/schemastery`、无生命周期脚本、Bundle Patch 只插入自身、第三方项目与命名空间声明）、「权限与数据边界」（读 `~/.dsh/sessions` 只读 / 只写插件私有目录 / 本机路由走宿主鉴权 / 只读官方投影 / 可选宿主 llm；不收集遥测）、「已知限制与风险」（存档代际演进、首扫性能、并入右栏版本依赖、LLM 摘要前置条件、DOM 级增强的适配风险）——对应 DSH STORE 提交自检清单的「用途 / 安装启用 / 外部依赖 / 权限 / 已知风险」要求
+
 ## [1.4.7] - 2026-10-18
 
 ### 修复
@@ -183,7 +188,7 @@
 **其他**
 - 缓存管理面板（索引 + 时间线分类清理，仅限插件私有目录）
 
-[Unreleased]: https://github.com/YeqingTang/dsh-session-flow/compare/v1.4.7...HEAD
+[Unreleased]: https://github.com/YeqingTang/dsh-session-flow/compare/v1.4.8...HEAD
 [0.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v0.1.0
 [1.0.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.0.0
 [1.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.1.0
@@ -197,3 +202,4 @@
 [1.4.5]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.5
 [1.4.6]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.6
 [1.4.7]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.7
+[1.4.8]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.8

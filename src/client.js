@@ -59,8 +59,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
     pianoClassicStrip: { kind: 'bool', labelKey: 'setPianoClassic', hintKey: 'setPianoClassicHint' },
     railHideOfficial: { kind: 'bool', labelKey: 'setRailHide', hintKey: 'setRailHideHint' },
   }
-  function formatSettingValue(v) { return v === undefined || v === null ? '' : String(v) }
-  function parseSettingValue(spec, text) {
+  function formatSettingValue(v) { return v === undefined || v === null ? '' : String(v) }  function parseSettingValue(spec, text) {
     if (spec.kind === 'bool') {
       const t = String(text).trim()
       return t === 'true' ? true : t === 'false' ? false : undefined
@@ -158,11 +157,15 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
       const landed = new Set()
       for (const [key, staged] of pending) {
         try {
-          if (staged.clear) { await this.scope.unset(key); landed.add(key); continue }
+          if (staged.clear) {
+            const ok = await this.scope.unset(key)
+            if (ok !== false) landed.add(key)
+            continue
+          }
           const v = parseSettingValue(SETTING_FIELD_SPECS[key], staged.text)
           if (v === undefined) continue
-          await this.scope.set(key, v)
-          landed.add(key)
+          const ok = await this.scope.set(key, v)
+          if (ok !== false) landed.add(key) // 宿主拒绝（false）不计入落盘，失败在 UI 显式提示
         } catch (e) {}
       }
       for (const [key, before] of pending) if (landed.has(key) && this.draft.get(key) === before) this.draft.delete(key)
@@ -1945,7 +1948,8 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
         // T6：并入右栏（工作台详情页 + 嵌入标签页都显示）。嵌入模式点击后额外
         // 自动切回「对话」标签——右栏已接管会话流展示，中栏标签页继续停留会造成
         // 双视图冗余（用户指定交互：点击=打开 dock+跳回对话）。
-        h('button', {
+        // dsh 0.2.x 无 details 列 → dockSupported=false 时不渲染该入口（优雅降级）。
+        dockSupported && h('button', {
           className: 'sf-btn',
           onClick: () => {
             if (dockBridge.controller) dockBridge.controller.open()
@@ -2450,6 +2454,11 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
     (typeof window !== 'undefined'
       ? (window.__dshSessionFlowDock__ = { open: false, listeners: new Set(), controller: null })
       : { open: false, listeners: new Set(), controller: null })
+  // 并入右栏能力探测（dsh 0.2.x 布局重构）：旧实现依赖官方 details 列
+  // （layout.openDetails / closeDetails + 官方 'details' 槽位，来自 web-all 的详情面板）。
+  // 0.2.x 三层布局换成左侧栏 + 会话区 + 右侧栏（无 details 列、无该槽位、无 openDetails）
+  // → 能力缺失时优雅降级：隐藏「并入右栏」入口、不注册 details 槽、不开列、不报错。
+  let dockSupported = false
   const PIANO_WINDOW = 15
 
   // T6：从嵌入标签页切回「对话」标签。官方 conversation.view 槽位环的标签栏没有
@@ -3922,13 +3931,43 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
           console.error('[dsh-session-flow] header health chip registration failed:', error)
         }
         // 插件设置页：settings.section 顶级 tab（order 140，排在皮肤中心 120/宠物 130 之后）。
-        // 读写经 settingsScope（pet 同款：优先 webUiSettings 桥，回退 settingsScope）；
-        // 两者都不可用（旧宿主/未暴露）时不注册 tab。controller 闭包持有，
-        // 卸载经 slots.inject 返回的 disposer 释放 scope 订阅。
+        // 绑定优先级（dsh 0.1.7+ 设置体系重构）：
+        //   ① configForms 直连——新宿主的原生表单控制器，命名空间 = profile 条目 id
+        //      （本插件 'dsh-session-flow'，Config 导出）；这是唯一能真正写回宿主设置
+        //      （profile patch）的通道。⚠️ 不能只依赖 ctx.get('webUiSettings')：apply 时机
+        //      可能尚未就绪，回退到 settingsScope 时会被 dsh-settings-scope-shim 的
+        //      localStorage 假存储劫持（面板「可用」但保存只写浏览器、宿主收不到，实测踩坑）。
+        //   ② webUiSettings 桥（≤0.1.6 旧宿主 / 新宿主桥接）：bind 命名空间双口径
+        //      （configForms 在 = 'dsh-session-flow'，否则旧命名空间 'session-flow'）。
+        //   ③ settingsScope（旧宿主直供 / shim）：同上双口径 bind。
+        // 三路都拿不到时不注册 tab（行为回退默认值）。
         try {
-          const settingsBinder = ctx.get('webUiSettings') ?? ctx.get('settingsScope')
-          if (settingsBinder !== undefined && settingsBinder !== null && typeof settingsBinder.bind === 'function') {
-            sfSettingsCtrl = new SfSettingsController(settingsBinder.bind({ namespace: 'session-flow' }))
+          let settingsScope = null
+          try {
+            const forms = ctx.get('configForms')
+            if (forms !== undefined && forms !== null && typeof forms.get === 'function' && typeof forms.describe === 'function') {
+              const form = forms.get('dsh-session-flow')
+              try {
+                const mirror = forms.describe()
+                if (mirror && typeof mirror.ensure === 'function') mirror.ensure()
+              } catch (e) {}
+              settingsScope = form
+            }
+          } catch (e) {}
+          if (settingsScope === null) {
+            const settingsBinder = ctx.get('webUiSettings') ?? ctx.get('settingsScope')
+            if (settingsBinder !== undefined && settingsBinder !== null && typeof settingsBinder.bind === 'function') {
+              let newHost = false
+              try {
+                const forms = ctx.get('configForms')
+                newHost = forms !== undefined && forms !== null && typeof forms.get === 'function'
+              } catch (e) {}
+              const namespace = newHost ? 'dsh-session-flow' : 'session-flow'
+              settingsScope = settingsBinder.bind({ namespace })
+            }
+          }
+          if (settingsScope !== null) {
+            sfSettingsCtrl = new SfSettingsController(settingsScope)
             slots.inject('settings.section', () => {
               const unregister = slots.register({
                 name: 'settings.section',
@@ -3951,6 +3990,9 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
       //  ① html 打 data-dsh-dock-active 标记 → CSS 禁用 grid 列宽过渡（切换无「关→开」动画）；
       //  ② 高频守护（150ms）快速重开列 → 视觉上右栏内容直接刷新为新会话。
       const layout = ctx.get('layout')
+      // 能力探测（dsh 0.2.x）：新三层布局没有官方 details 列（layout.openDetails 缺失），
+      // 「并入右栏」入口随之隐藏；旧布局（≤0.1.x + web-all 详情面板）保持原行为。
+      dockSupported = layout !== undefined && layout !== null && typeof layout.openDetails === 'function'
       let detailsRegistration = null
       let detailsGuard = null
       const setDockActive = (on) => {
@@ -3970,6 +4012,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
         }
       }
       const syncDetails = () => {
+        if (!dockSupported) return // 0.2.x：无 details 列/槽位，注册与开列均跳过（优雅降级）。
         if (dockBridge.open && detailsRegistration === null && slots !== undefined && typeof slots.inject === 'function') {
           try {
             detailsRegistration = slots.inject('details', () => slots.register({
@@ -4002,6 +4045,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
           return () => dockBridge.listeners.delete(fn)
         },
         open: () => {
+          if (!dockSupported) return // 0.2.x 无 details 列：open 变空操作（入口已隐藏）。
           if (!dockBridge.open) {
             dockBridge.open = true
             syncDetails()

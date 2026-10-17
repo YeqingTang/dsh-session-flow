@@ -3,6 +3,15 @@
 本插件所有显著变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.6] - 2026-10-18
+
+### 修复
+- **设置页真正写回宿主（dsh 0.2.x）**：设置弹窗「会话流」分节此前绑定 `webUiSettings`/`settingsScope` 桥——在 0.2.x 上 apply 时机取不到 web-all 桥，回落 `dsh-settings-scope-shim` 的 **localStorage 假存储**：面板显示默认值且「可保存」，但保存只写浏览器本地、宿主设置（profile patch）永远收不到，「疑似卡死」阈值等 host 侧参数不生效，且每次改动都被 shim 吞掉。现改为**优先直连 `configForms` 原生表单控制器**（命名空间 = profile 条目 id `dsh-session-flow`，即 Config 导出所对应的设置页），保存真实写入 profile patch 并触发 volatile 热更新；旧宿主（≤0.1.6）仍走 webUiSettings/settingsScope 兜底。保存被宿主拒绝（`scope.set` 返回 false）时现显式提示「部分设置未能保存」，不再静默
+- **「并入右栏」在 dsh 0.2.x 优雅降级**：0.2.x 三层布局移除了官方 details 列（无 `layout.openDetails` / `details` 槽位），旧实现点击无反应且注册落在不存在的槽位。现 apply 时探测能力：不支持则隐藏「并入右栏」入口、不注册 details 槽位、不打开列、不报错；旧布局（≤0.1.x + web-all 详情面板）行为不变
+
+### 变更
+- **DSH 商店兼容性声明**：`dshReleases` 矩阵补 `0.2.1-rc.2`（compatible，本机真机验证）
+
 ## [1.4.5] - 2026-10-13
 
 ### 修复
@@ -163,7 +172,7 @@
 **其他**
 - 缓存管理面板（索引 + 时间线分类清理，仅限插件私有目录）
 
-[Unreleased]: https://github.com/YeqingTang/dsh-session-flow/compare/v1.4.5...HEAD
+[Unreleased]: https://github.com/YeqingTang/dsh-session-flow/compare/v1.4.6...HEAD
 [0.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v0.1.0
 [1.0.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.0.0
 [1.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.1.0
@@ -175,3 +184,4 @@
 [1.4.3]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.3
 [1.4.4]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.4
 [1.4.5]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.5
+[1.4.6]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.6

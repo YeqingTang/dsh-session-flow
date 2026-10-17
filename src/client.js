@@ -29,8 +29,10 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
   const PANEL_NAME = 'sessionflow'
   // 会话面板容器选择器：dsh v0.1.2 起官方移除 data-pane="conversation"（会话流
   // 重构进 dsh-client-ui-chat），兜底命中布局中栏（CenterColumn，类名含 centerCol
-  // 哈希后缀稳定片段）。工作台/标签切换/钢琴键定位共用此锚。
-  const CONVERSATION_SELECTOR = '[data-pane="conversation"], [class*=centerCol]'
+  // 哈希后缀稳定片段）。dsh 0.2.0 起 CenterColumn 也被拆掉，中栏正文容器改为
+  // dsh-client-ui-conversation 的 [data-conversation-region="chat"]（稳定 data 钩，
+  // 替代 centerCol 成为第二优先级）。工作台/标签切换/钢琴键定位共用此锚。
+  const CONVERSATION_SELECTOR = '[data-pane="conversation"], [data-conversation-region="chat"], [class*=centerCol]'
   const SIDEBAR_ROW_SELECTOR = '[class*="sessionRow"], [class*="projectRow"], [class*="searchResultRow"], [class*="searchResultWorkspace"], [class*="newSession"]'
   const ACTIVE_WINDOW_MS = 15 * 60 * 1000 // 最近 15 分钟有事件 → 视为进行中（归档/总览徽标用）
 
@@ -375,6 +377,45 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
   }
   const canOfficialRename = (conn) =>
     conn !== undefined && conn.api !== undefined && conn.api.sessions !== undefined && typeof conn.api.sessions.rename === 'function'
+  /**
+   * 实时通道可用性（双面判定）：新面 remote.session（dsh ≥ 0.1.5，page/pageBySession）
+   * 或旧面 connection.api.sessions（≤ 0.1.4）。dsh 0.1.5 起 connection 句柄去掉了 `api`
+   * 字段（改由 api-gateway / session-controller 等独立包承载）——只按旧面判定会让实时
+   * 通道恒报「no connection / liveUnavailable」，即使 remote.session.page 明明可用
+   * （GitHub issue #4 的根因）。sfRemoteRef 在 mount/apply 时由双面适配器填充。
+   */
+  const sfLiveAvailable = (conn, remote) => {
+    if (remote !== undefined && remote !== null) return true
+    return conn !== undefined && conn !== null && conn.api !== undefined && conn.api.sessions !== undefined
+  }
+  // ── v0.2.0 兼容：会话打开双面 ─────────────────────────
+  // 旧面：sessions.open(id)（≤0.1.x；0.2.0 会话面只剩 retain/using/list，开会话
+  // 已移除）。新面：ctx.uiWorkspace.openSession(id)（0.2.0 官方会话切换口径，
+  // conversation 内 workspaceNavigation.openSession 同款）。apply 时探测：
+  // 有 uiWorkspace 用新面，旧宿主回退旧面；调用点统一走 sfOpenSession。
+  const sfOpenerRef = { current: null }
+  const sfBuildOpener = (ctx, sessions) => {
+    let nav = null
+    try { nav = ctx && typeof ctx.get === 'function' ? ctx.get('uiWorkspace') : null } catch (e) { nav = null }
+    const canNav = nav !== null && nav !== undefined && typeof nav.openSession === 'function'
+    const canLegacy = sessions !== null && sessions !== undefined && typeof sessions.open === 'function'
+    return (sessionId) => {
+      if (canNav) return nav.openSession(sessionId)
+      if (canLegacy) return sessions.open(sessionId)
+      throw new Error('no session opener (uiWorkspace.openSession/sessions.open both missing)')
+    }
+  }
+  const sfOpenSession = (props, sessionId) => {
+    const fn = (props && typeof props.openSession === 'function')
+      ? props.openSession
+      : (sfOpenerRef.current || null)
+    if (fn) return fn(sessionId)
+    const legacy = props && props.sessions && typeof props.sessions.open === 'function'
+      ? props.sessions.open.bind(props.sessions)
+      : null
+    if (legacy) return legacy(sessionId)
+    throw new Error('no session opener')
+  }
   // ── v0.1.2 兼容（三）：session RPC 双面适配器 ─────────────────────
   // 新面：ctx.remote.session.*（inject 需声明 remote/remote.session，否则代理抛
   // 「cannot get property remote.session without inject」）；信封顶层 {ok,value}；
@@ -759,7 +800,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
         localStorage.setItem(storeKey, JSON.stringify(st))
         localStorage.setItem(PENDING_SEARCH_KEY, JSON.stringify({ sessionId: hit.sessionId, query: query.trim() }))
       } catch (e) {}
-      try { props.sessions.open(hit.sessionId) } catch (e) { console.warn('[dsh-session-flow] open failed', hit.sessionId, e) }
+      try { sfOpenSession(props, hit.sessionId) } catch (e) { console.warn('[dsh-session-flow] open failed', hit.sessionId, e) }
       // 关闭工作台（中栏交还给会话），用户直接看到目标会话的会话流标签页——
       // 否则工作台仍覆盖中栏，需手动点侧边栏才可见（实测踩坑）。
       try { if (props.onClose) props.onClose() } catch (e) {}
@@ -1569,7 +1610,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
 
     const jumpNative = () => {
       try {
-        props.sessions.open(session.id)
+        sfOpenSession(props, session.id)
         // 打开原生会话后收起会话流视图，交还中栏给对话界面。
         props.onClose()
       } catch (error) {
@@ -1633,8 +1674,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
     const liveSeenTurns = useRef(new Set())
     const fetchLive = useRef(async () => {})
     fetchLive.current = async () => {
-      const conn = props.connection
-      if (conn === undefined || conn.api === undefined || conn.api.sessions === undefined) {
+      if (!sfLiveAvailable(props.connection, sfRemoteRef.current)) {
         setLiveState((s) => ({ ...s, phase: 'error', error: STR.liveUnavailable }))
         return
       }
@@ -1948,14 +1988,17 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
         // T6：并入右栏（工作台详情页 + 嵌入标签页都显示）。嵌入模式点击后额外
         // 自动切回「对话」标签——右栏已接管会话流展示，中栏标签页继续停留会造成
         // 双视图冗余（用户指定交互：点击=打开 dock+跳回对话）。
-        // dsh 0.2.x 无 details 列 → dockSupported=false 时不渲染该入口（优雅降级）。
-        dockSupported && h('button', {
+        // dsh ≥0.1.5 走右栏标签页体系，≤0.1.4 走旧 details 列；两代都不可用时
+        // 按钮禁用并提示（不再「点了没反应」）。
+        h('button', {
           className: 'sf-btn',
+          disabled: dockSupported === false,
           onClick: () => {
             if (dockBridge.controller) dockBridge.controller.open()
-            if (props.embedded) activateChatTab()
+            // 只有真的并入成功才切回对话标签——否则点了没反应还把人从中栏踢走。
+            if (props.embedded && dockBridge.open) activateChatTab()
           },
-          title: STR.dockHint,
+          title: dockSupported === false ? STR.dockUnavailable : STR.dockHint,
         }, STR.dock),
         // M6 实时通道：进行中会话可实时查看（sessions.history → derive → 折叠视图）。
         props.connection !== undefined && h('button', {
@@ -2212,7 +2255,8 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
       setLiveFallback(false)
       if (!sessionId) return undefined
       const conn = props.connection
-      const canLive = conn !== undefined && conn.api !== undefined && conn.api.sessions !== undefined
+      // 双面判定：remote.session（0.1.5+）或 connection.api.sessions（≤0.1.4），见 sfLiveAvailable。
+      const canLive = sfLiveAvailable(conn, sfRemoteRef.current)
       const toFallback = () => { if (alive && canLive) setLiveFallback(true) }
       api('get', { sessionId }).then((json) => {
         if (!alive) return
@@ -3133,9 +3177,35 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
     )
   }
 
-  // ── M12：详情并入右侧栏（details 槽位轻量视图）────────────────────
+  // ── M12：详情并入右侧栏（details 槽位轻量视图 / 0.1.5+ 右栏标签页 body）──────
   // 随会话自动切换（槽位 session 作用域 key 重挂载）；数据复用 host get/getTurn；
   // 回合列表直接复用 TurnList（展开 → TimelineTurns 完整渲染）。
+
+  /** M12：右栏标签页里的会话流 body（dsh ≥ 0.1.5 的右栏标签页体系）。
+   * 把右栏注入的 hook（useTabInfo）转成 DetailsDockView 需要的 props；
+   * 「退出并入」接到本标签页自己的关闭动作（tab.actions.close()，与右栏 chip 上的
+   * ✕ 同源，两条路径行为一致）；卸载时回落到插件侧状态——用户从右栏自己的 ✕ 关掉
+   * 本标签页时，插件侧的开/关标记要跟着回落，否则按钮状态和右栏不一致。 */
+  function DockTabBody(props) {
+    const { sessionId, connection, onClose } = props
+    const info = typeof props.useTabInfo === 'function' ? props.useTabInfo() : null
+    const actions = info !== null && info.tab !== undefined ? info.tab.actions : null
+    useEffect(() => () => {
+      if (dockBridge.open) {
+        dockBridge.open = false
+        for (const fn of dockBridge.listeners) fn()
+      }
+    }, [])
+    return h(DetailsDockView, {
+      sessionId,
+      connection,
+      onExit: () => {
+        try { if (actions !== null) actions.close() } catch (e) {}
+        if (typeof onClose === 'function') onClose()
+      },
+    })
+  }
+
   function DetailsDockView(props) {
     const { sessionId, connection, onExit } = props
     const [state, setState] = useState({ phase: 'loading', error: null, data: null })
@@ -3169,7 +3239,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
     fetchLive.current = async () => {
       const sid = liveStore.sid
       const conn = liveStore.conn
-      if (sid === undefined || conn === undefined || conn.api === undefined || conn.api.sessions === undefined) {
+      if (sid === undefined || !sfLiveAvailable(conn, sfRemoteRef.current)) {
         liveStore.lastState = { phase: 'error', error: STR.liveUnavailable, timeline: [], running: false, eventCount: 0, health: null }
         if (liveStore.emit !== null) liveStore.emit(liveStore.lastState)
         return
@@ -3799,7 +3869,14 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
     let waitObserver = null
 
     const ensure = () => {
-      if (container !== undefined) return
+      // 自愈：中栏容器被 React 重建（会话切换/视图卸载）时旧容器脱离，
+      // 必须丢弃并重新挂载，否则面板永远不再出现（0.2.x 高频触发）。
+      if (container !== undefined) {
+        if (container.isConnected) return
+        try { if (root) root.unmount() } catch (e) {}
+        root = undefined
+        container = undefined
+      }
       const column = document.querySelector(CONVERSATION_SELECTOR)
       if (column === null) return
       container = document.createElement('div')
@@ -3808,7 +3885,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
       // [data-dsh-session-flow-view] 属性规则控制（见 STYLE 注释）。
       column.appendChild(container)
       root = createRoot(container)
-      root.render(h(SessionFlowView, { sessions, connection, onClose: () => controller.close() }))
+      root.render(h(SessionFlowView, { sessions, connection, openSession: sfOpenerRef.current, onClose: () => controller.close() }))
     }
 
     waitObserver = new MutationObserver(() => { ensure() })
@@ -3853,6 +3930,8 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
       const connection = ctx.get('connection')
       // v0.1.2 RPC 双面适配（remote.session 新面优先，connection 旧面回退）。
       sfRemoteRef.current = sfBuildRemote(ctx, connection)
+      // v0.2.0 会话打开双面（uiWorkspace.openSession 新面优先，sessions.open 旧面回退）。
+      sfOpenerRef.current = sfBuildOpener(ctx, sessions)
       // 设置控制器引用：settings.section 注册块内创建，挂载钢琴键/导航增强层时
       // 传给 NavRoot 做设置变更即时切换（不可用则为 null，走默认值）。
       let sfSettingsCtrl = null
@@ -3904,6 +3983,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
             sessionId: props ? props.sessionId : undefined,
             sessions,
             connection,
+            openSession: sfOpenerRef.current,
             onOpenWorkbench: () => controller.open(),
           })))
         } catch (error) {
@@ -3921,6 +4001,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
             sessionId: slotProps ? slotProps.sessionId : undefined,
             sessions,
             connection,
+            openSession: sfOpenerRef.current,
             onOpen: () => {
               const sid = slotProps && slotProps.sessionId
               if (sid) workbenchBridge.open(sid)
@@ -3983,23 +4064,72 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
         }
       }
 
-      // M12：详情并入右侧栏 —— details 槽位动态占用（priority -1 低于官方 tool-details）。
-      // 并入开启时注册 + **打开官方 details 列（layout.openDetails——列默认宽度 0 不可见，
-      // plan-graph 同款；曾漏开列导致「无响应」，实测踩坑）**；退出/卸载注销 + closeDetails。
-      // 官方在会话切换时自动 closeDetails（无法阻止）——并入期间：
-      //  ① html 打 data-dsh-dock-active 标记 → CSS 禁用 grid 列宽过渡（切换无「关→开」动画）；
-      //  ② 高频守护（150ms）快速重开列 → 视觉上右栏内容直接刷新为新会话。
+      // M12：详情并入右侧栏 —— 两代官方接入方式（issue #2）：
+      //  ① dsh ≥ 0.1.5（含 0.2.x）：官方移除 details 列，改为右栏标签页体系
+      //     （rightbar → rightbar.session → sidebar.right.pane.tab，见官方 commit
+      //     7e017046ca）。按公开两段式注册：向 sidebarRightTabs 注册 page 类型 +
+      //     把 body 注册进 keyed 的 sidebar.right.pane.tab（key = 类型 id）；
+      //     打开用 sidebarRight.openTab(kind)——它内部会展开右栏列，会话切换也不再
+      //     被强制关掉，所以旧版「手动 openDetails + 150ms 守护重开列 + 关列宽动画
+      //     标记」的补偿逻辑在新路径整体不需要。
+      //  ② dsh ≤ 0.1.4 + web-all：沿用旧 details 槽位 + layout.openDetails/closeDetails
+      //     动态占用（并入期间打 data-dsh-dock-active + 150ms 守护重开列）。
+      // 两代都不可用 → 「并入右栏」入口禁用并提示（不再是「点了没反应」）。
+      const DOCK_KIND = 'session-flow'
+      const DOCK_ID = 'dsh-session-flow'
       const layout = ctx.get('layout')
-      // 能力探测（dsh 0.2.x）：新三层布局没有官方 details 列（layout.openDetails 缺失），
-      // 「并入右栏」入口随之隐藏；旧布局（≤0.1.x + web-all 详情面板）保持原行为。
-      dockSupported = layout !== undefined && layout !== null && typeof layout.openDetails === 'function'
+      let sidebarRight = null
+      let sidebarRightTabs = null
+      try { sidebarRight = ctx.get('sidebarRight') } catch (e) {}
+      try { sidebarRightTabs = ctx.get('sidebarRightTabs') } catch (e) {}
+      const rightbarAvailable = sidebarRight !== null && sidebarRight !== undefined
+        && typeof sidebarRight.openTab === 'function'
+        && sidebarRightTabs !== null && sidebarRightTabs !== undefined
+        && typeof sidebarRightTabs.register === 'function'
+      const detailsAvailable = layout !== undefined && layout !== null && typeof layout.openDetails === 'function'
+      dockSupported = rightbarAvailable || detailsAvailable
       let detailsRegistration = null
       let detailsGuard = null
+      let dockTypeDispose = null
+      let dockBodyDispose = null
       const setDockActive = (on) => {
         try {
           if (on) document.documentElement.setAttribute('data-dsh-dock-active', '')
           else document.documentElement.removeAttribute('data-dsh-dock-active')
         } catch (e) {}
+      }
+
+      // 新路径：page 类型 + tab body（apply 时只登记能力，不占列、不可见；open 才开标签页）。
+      if (rightbarAvailable) {
+        try {
+          dockTypeDispose = sidebarRightTabs.register({
+            id: DOCK_ID,
+            kind: DOCK_KIND,
+            // 站外类型用 extension 段位（可覆盖同 kind 的 builtin）。
+            priority: 'extension',
+            // 标签页 chip 文案；未注册 .title 槽位时用它（少一个注册点少一处失效面）。
+            title: () => STR.entry,
+          })
+        } catch (error) {
+          console.error('[dsh-session-flow] sidebarRight tab type registration failed:', error)
+          dockTypeDispose = null
+        }
+        if (dockTypeDispose !== null && slots !== undefined && typeof slots.inject === 'function') {
+          try {
+            dockBodyDispose = slots.inject('sidebar.right.pane.tab', () => slots.register({
+              name: 'sidebar.right.pane.tab',
+              key: DOCK_ID,
+            }, (props) => h(DockTabBody, {
+              sessionId: props ? props.sessionId : undefined,
+              useTabInfo: props ? props.useTabInfo : undefined,
+              connection,
+              onClose: () => { if (dockBridge.controller) dockBridge.controller.close() },
+            })))
+          } catch (error) {
+            console.error('[dsh-session-flow] sidebarRight tab body registration failed:', error)
+            dockBodyDispose = null
+          }
+        }
       }
 
       // M12×aionui：官方 details 把手在 5 轨 grid 下的位置补偿已由上游
@@ -4012,7 +4142,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
         }
       }
       const syncDetails = () => {
-        if (!dockSupported) return // 0.2.x：无 details 列/槽位，注册与开列均跳过（优雅降级）。
+        if (!detailsAvailable) return // 新布局无 details 槽位：旧路径整体跳过。
         if (dockBridge.open && detailsRegistration === null && slots !== undefined && typeof slots.inject === 'function') {
           try {
             detailsRegistration = slots.inject('details', () => slots.register({
@@ -4038,15 +4168,31 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
           }
         }
       }
+      dockBridge.available = dockSupported
+      /** 退出并入：只回落插件侧状态——标签页本身由 DockTabBody 的 tab.actions.close() 关。 */
+      const resetDock = () => {
+        if (!dockBridge.open) return
+        dockBridge.open = false
+        for (const fn of dockBridge.listeners) fn()
+      }
       dockBridge.controller = {
-        getSnapshot: () => ({ open: dockBridge.open }),
+        getSnapshot: () => ({ open: dockBridge.open, available: dockBridge.available }),
         subscribe: (fn) => {
           dockBridge.listeners.add(fn)
           return () => dockBridge.listeners.delete(fn)
         },
         open: () => {
-          if (!dockSupported) return // 0.2.x 无 details 列：open 变空操作（入口已隐藏）。
-          if (!dockBridge.open) {
+          if (dockBridge.open) return
+          if (rightbarAvailable) {
+            dockBridge.open = true
+            try { sidebarRight.openTab(DOCK_KIND) } catch (error) {
+              console.error('[dsh-session-flow] sidebarRight.openTab failed:', error)
+              dockBridge.open = false
+            }
+            for (const fn of dockBridge.listeners) fn()
+            return
+          }
+          if (detailsAvailable) {
             dockBridge.open = true
             syncDetails()
             // 会话切换时官方会自动 closeDetails —— 高频守护快速重开（无动画，内容直接刷新）。
@@ -4054,15 +4200,17 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
               detailsGuard = setInterval(() => { ensureColumn() }, 150)
             }
             for (const fn of dockBridge.listeners) fn()
+            return
           }
+          console.warn('[dsh-session-flow] 并入右栏不可用：缺少 sidebarRight/sidebarRightTabs 与 layout.openDetails（需 dsh ≥ 0.1.5 右栏标签页体系，或旧 details 列）')
         },
         close: () => {
-          if (dockBridge.open) {
-            dockBridge.open = false
-            syncDetails()
-            if (detailsGuard !== null) { clearInterval(detailsGuard); detailsGuard = null }
-            for (const fn of dockBridge.listeners) fn()
-          }
+          if (rightbarAvailable) { resetDock(); return }
+          if (!dockBridge.open) return
+          dockBridge.open = false
+          syncDetails()
+          if (detailsGuard !== null) { clearInterval(detailsGuard); detailsGuard = null }
+          for (const fn of dockBridge.listeners) fn()
         },
       }
       syncDetails()
@@ -4106,7 +4254,15 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
       }
 
       const teardown = () => {
-        // M12：卸载时注销 details 槽位占用（恢复官方 tool-details）+ 关列 + 清守护 + 移除标记。
+        // M12：卸载时注销右栏 tab body 与 page 类型（新路径）+ 旧 details 槽位占用/关列/清守护。
+        if (dockBodyDispose) {
+          try { dockBodyDispose() } catch (e) {}
+          dockBodyDispose = null
+        }
+        if (dockTypeDispose) {
+          try { dockTypeDispose() } catch (e) {}
+          dockTypeDispose = null
+        }
         if (detailsRegistration) {
           try { detailsRegistration() } catch (e) {}
           detailsRegistration = null

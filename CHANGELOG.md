@@ -3,6 +3,17 @@
 本插件所有显著变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.7] - 2026-10-18
+
+### 修复
+- **「并入右栏」在 dsh ≥0.1.5 彻底失效（GitHub issue #2）**：官方移除 details 列与 `layout.openDetails`（改为右栏标签页体系）后，旧实现点击无响应。现按官方公开两段式接入：`sidebarRightTabs.register` 注册 page 类型 + `sidebar.right.pane.tab`（keyed）注册 body，`sidebarRight.openTab(kind)` 打开（内部自动展开右栏列，会话切换不再强制关闭）；「退出并入」接到本标签页的 `tab.actions.close()`（与右栏 chip 的 ✕ 同源）；从右栏 ✕ 关闭时插件侧状态自动回落。≤0.1.4 宿主仍走旧 details 列路径；两代都不可用时按钮禁用并提示（不再是静默无响应）。致谢 @dzwalker 的 PR #3（同一方向的完整实现，作为集成基础）
+- **实时通道在 dsh ≥0.1.5 恒报不可用（GitHub issue #4）**：0.1.5 起 connection 句柄移除 `api` 字段，旧门禁（`conn.api.sessions`）短路了明明可用的 `remote.session` 新面。改为双面判定 `sfLiveAvailable`：`remote.session`（≥0.1.5）或 `connection.api.sessions`（≤0.1.4），详情页/右栏实时/兜底视图三处门禁统一
+- **存档定位改为代际自适应（根治「not found in archives」类问题）**：不再按 v1/v2/v3/v4 硬编码降序，改为 `session[.vN].jsonl[.zstd]` 取**代际号最大**者（同代际优先 zstd、`.tmp` 等非 canonical 名忽略）——以后 dsh 迁移到 v5/v6 无需改代码。致谢 @dzwalker 的 PR #1
+- **dsh 0.2.x 会话打开与中栏锚点**：会话打开改双面（`uiWorkspace.openSession` 新面 → `sessions.open` 旧面）；中栏容器锚点补官方稳定钩 `[data-conversation-region="chat"]`（`centerCol` 已被 0.2.0 拆掉）；中栏容器被 React 重建时自愈重挂（不再永久消失）。致谢 @sulingqingQAQ 的 PR #5
+
+### 变更
+- **DSH 商店兼容性声明**：`dshReleases` 维持 `0.2.1-rc.2` compatible（本机真机复验）；新增 `verify/verify-dock-tabs.mjs`（右栏标签页接入运行时行为回归）
+
 ## [1.4.6] - 2026-10-18
 
 ### 修复
@@ -172,7 +183,7 @@
 **其他**
 - 缓存管理面板（索引 + 时间线分类清理，仅限插件私有目录）
 
-[Unreleased]: https://github.com/YeqingTang/dsh-session-flow/compare/v1.4.6...HEAD
+[Unreleased]: https://github.com/YeqingTang/dsh-session-flow/compare/v1.4.7...HEAD
 [0.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v0.1.0
 [1.0.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.0.0
 [1.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.1.0
@@ -185,3 +196,4 @@
 [1.4.4]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.4
 [1.4.5]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.5
 [1.4.6]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.6
+[1.4.7]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.7

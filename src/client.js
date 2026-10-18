@@ -1029,17 +1029,27 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
         ),
         fileQuery.trim().length < 2 && h('div', { className: 'sf-muted' }, STR.fileLookupHint),
         fileQuery.trim().length >= 2 && fileResults.length === 0 && h('div', { className: 'sf-hint' }, STR.fileLookupNone),
-        fileResults.map((group) => group.rows.map((row) =>
+        fileResults.map((group) => {
+          // P1-C'：强标记 = 会话时间窗重叠（并行改动真实风险）；弱标记 = 先后改同文件。
+          const windows = group.rows.map((r) => [r.s.createdAt || 0, r.s.lastEventTime || 0]).sort((a, b) => a[0] - b[0])
+          let overlapped = false
+          for (let i = 1; i < windows.length; i++) {
+            if (windows[i][0] <= windows[i - 1][1]) { overlapped = true; break }
+          }
+          return group.rows.map((row) =>
           h('div', {
             key: group.file + ':' + row.s.id,
             className: 'sf-fileRow',
             onClick: () => props.onOpen(row.s),
           },
             h('span', { className: 'sf-filePath', title: group.file }, group.file),
-            group.rows.length > 1 && h('span', { className: 'sf-fileMulti', title: STR.fileLookupMulti }, '⚠ ' + group.rows.length),
+            overlapped
+              ? h('span', { className: 'sf-fileMulti', title: STR.fileLookupOverlap }, '⚠ ' + group.rows.length)
+              : group.rows.length > 1 && h('span', { className: 'sf-fileMulti sf-fileMultiWeak', title: STR.fileLookupMulti }, '×' + group.rows.length),
             h('span', { className: 'sf-fileName' }, row.s.userTitle || row.s.title || STR.unknownTitle),
             h('span', { className: 'sf-muted' }, row.ws.label + ' · ' + fmtTime(row.s.lastEventTime)),
-          ))),
+          ))
+        }),
       ),
       cacheOpen && h('div', { className: 'sf-cachePanel' },
         h('div', { className: 'sf-muted', style: { flex: 'none' } }, STR.cacheHint),
@@ -1714,6 +1724,55 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
     const toolCursor = useRef(new Map())
     // P1-A：变更清单折叠态（默认收拢；无变更不渲染）。
     const [changesOpen, setChangesOpen] = useState(false)
+    // P1-A+：diff 卡展开态（key = 'w'|'e' + ':' + index）。内容直接从已加载回合
+    // items 现场解析（diffEntriesFor）；展开时若回合未加载则 ensureTurn 懒拉。
+    const [diffOpen, setDiffOpen] = useState(() => new Set())
+    // 行级 diff：公共首尾行裁剪（edit 的 old/new 通常大段相同），中段红删绿增。
+    const diffLinesOf = (oldText, newText) => {
+      const a = String(oldText || '').split('\n')
+      const b = String(newText || '').split('\n')
+      let i = 0
+      while (i < a.length && i < b.length && a[i] === b[i]) i++
+      let j = 0
+      while (j < a.length - i && j < b.length - i && a[a.length - 1 - j] === b[b.length - 1 - j]) j++
+      return {
+        head: i, tail: j,
+        removed: a.slice(i, a.length - j || a.length),
+        added: b.slice(i, b.length - j || b.length),
+      }
+    }
+    // 从已加载回合的 items 里找该回合对同一路径的 write/edit 调用（带完整参数）。
+    const diffEntriesFor = (turnNo, toolName, path) => {
+      const turn = turnItems.get(turnNo)
+      if (!turn || !Array.isArray(turn.items)) return null
+      const out = []
+      for (const it of turn.items) {
+        if (it.kind !== 'tool' || !it.call) continue
+        if (String(it.call.name || '').toLowerCase() !== toolName) continue
+        try {
+          const args = JSON.parse(it.call.argumentsText || '{}')
+          if (String(args.file_path || args.path || '') !== path) continue
+          if (toolName === 'write') {
+            const content = String(args.content || '')
+            out.push({ isNew: true, lines: content.split('\n').length })
+          } else {
+            out.push({ isNew: false, ...diffLinesOf(args.old_string, args.new_string) })
+          }
+        } catch { /* 参数 JSON 截断/损坏时跳过 */ }
+      }
+      return out
+    }
+    const toggleDiff = (key, item) => {
+      if (diffOpen.has(key)) {
+        setDiffOpen((prev) => { const next = new Set(prev); next.delete(key); return next })
+        return
+      }
+      setDiffOpen((prev) => new Set(prev).add(key))
+      // 懒加载回合数据；完成后强制重渲（turnItems 变化已会触发渲染，这里保险一次）。
+      if (typeof item.turn === 'number' && !turnItems.has(item.turn)) {
+        ensureTurn(item.turn).then(() => setDiffOpen((p) => new Set(p)))
+      }
+    }
 
     // ── M6 实时通道：connection.api.sessions.history → host derive → 完整折叠视图 ──
     // 与 M4 子代理桥同一数据源形态（events 数组）；轮询刷新仅实时模式激活时进行。
@@ -2098,18 +2157,52 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
               h('span', { className: 'sf-statCount err' }, sessionInfo.toolErrors),
             ),
           ),
-          // P1-A 变更清单：本会话写入/修改了哪些文件、跑了哪些命令（默认收拢；
-          // 回合号点击 → 展开并定位该回合）。
-          (() => {
+            // P1-A 变更清单：本会话写入/修改了哪些文件、跑了哪些命令（默认收拢；
+            // 回合号点击 → 展开并定位该回合）。P1-A+：写入/修改行可展开 diff 卡
+            // （edit 红删绿增 / write「新建 N 行」），命令行失败标红。
+            (() => {
             const ch = (data.session && data.session.changes) || null
             if (!ch) return null
             const total = (ch.writes || []).length + (ch.edits || []).length + (ch.commands || []).length
             if (total === 0) return null
-            const group = (title, items, isCommand) => (
+            const diffCard = (entry) => {
+              if (entry.isNew) return h('div', { className: 'sf-diffNew' }, STR.diffNewFile.replace('{N}', String(entry.lines)))
+              const rows = []
+              if (entry.head > 1) rows.push(h('div', { key: 'h', className: 'sf-diffCtx' }, '…'))
+              for (const line of entry.removed) rows.push(h('div', { key: 'r' + rows.length, className: 'sf-diffDel' }, '− ' + line))
+              for (const line of entry.added) rows.push(h('div', { key: 'a' + rows.length, className: 'sf-diffAdd' }, '+ ' + line))
+              if (entry.tail > 1) rows.push(h('div', { key: 't', className: 'sf-diffCtx' }, '…'))
+              return h('div', { className: 'sf-diffCard' }, rows)
+            }
+            const fileRow = (item, i, toolName, keyPrefix) => {
+              const key = keyPrefix + ':' + i
+              const open = diffOpen.has(key)
+              const entries = open ? diffEntriesFor(item.turn, toolName, item.path) : null
+              return h('div', { key: i },
+                h('div', { className: 'sf-changesRow' },
+                  h('button', { className: 'sf-changesExp', title: STR.diffExpand, onClick: () => toggleDiff(key, item) }, open ? '▾' : '▸'),
+                  h('span', { className: 'sf-changesPath', title: item.path }, item.path),
+                  typeof item.turn === 'number' && h('button', {
+                    className: 'sf-changesTurn',
+                    title: 'T' + item.turn,
+                    onClick: () => scrollToMsg(item.turn, null),
+                  }, 'T' + item.turn),
+                ),
+                open && h('div', { className: 'sf-diffWrap' },
+                  entries === null
+                    ? h('div', { className: 'sf-muted' }, STR.diffLoading)
+                    : entries.length === 0
+                      ? h('div', { className: 'sf-muted' }, STR.diffNone)
+                      : entries.map((entry, j) => h('div', { key: j }, diffCard(entry))),
+                ),
+              )
+            }
+            const cmdGroup = (items) => (
               items.length > 0 && h('div', { className: 'sf-changesGroup' },
-                h('div', { className: 'sf-changesGroupTitle' }, title + '（' + items.length + '）'),
+                h('div', { className: 'sf-changesGroupTitle' }, STR.changeCmdGroup + '（' + items.length + '）'),
                 items.map((item, i) => h('div', { key: i, className: 'sf-changesRow' },
-                  h('span', { className: 'sf-changesPath', title: isCommand ? item.command : item.path }, isCommand ? item.command : item.path),
+                  item.failed === true && h('span', { className: 'sf-changesFailed', title: STR.cmdFailed }, '✗'),
+                  h('span', { className: 'sf-changesPath' + (item.failed === true ? ' failed' : ''), title: item.command }, item.command),
                   typeof item.turn === 'number' && h('button', {
                     className: 'sf-changesTurn',
                     title: 'T' + item.turn,
@@ -2125,9 +2218,13 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
                 ' · ' + STR.changeEditGroup + ' ' + (ch.edits || []).length +
                 ' · ' + STR.changeCmdGroup + ' ' + (ch.commands || []).length),
               changesOpen && h('div', { className: 'sf-changesBody' },
-                group(STR.changeWriteGroup, ch.writes || []),
-                group(STR.changeEditGroup, ch.edits || []),
-                group(STR.changeCmdGroup, ch.commands || [], true),
+                (ch.writes || []).length > 0 && h('div', { className: 'sf-changesGroup' },
+                  h('div', { className: 'sf-changesGroupTitle' }, STR.changeWriteGroup + '（' + ch.writes.length + '）'),
+                  ch.writes.map((item, i) => fileRow(item, i, 'write', 'w'))),
+                (ch.edits || []).length > 0 && h('div', { className: 'sf-changesGroup' },
+                  h('div', { className: 'sf-changesGroupTitle' }, STR.changeEditGroup + '（' + ch.edits.length + '）'),
+                  ch.edits.map((item, i) => fileRow(item, i, 'edit', 'e'))),
+                cmdGroup(ch.commands || []),
               ),
             )
           })(),

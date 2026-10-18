@@ -12,8 +12,14 @@
 ### 修复
 - **侧边栏「会话流」入口对齐官方 panelRow 规范**：对齐官方 `dsh-client-ui-sidebar` 的行样式（min-height 36 / radius-md / padding 7px 8px / margin 0 2px / gap 8px / font inherit / label-primary 常态色 / interactive-bg-hover 悬停激活）；图标 14→16px 与官方 glyph 对齐
 
+### 新增
+- **差异级变更视图（P1-A+）**：变更清单的写入/修改条目可展开为迷你 diff 卡——`edit` 显示行级红删绿增（公共首尾行裁剪省略）；`write` 显示「新建 N 行」；数据经回合懒加载，索引不膨胀
+- **命令成败标记（P1-B'）**：变更清单的执行命令按 tool 结果标红失败项（✗ + 划线），一眼看出本会话跑挂过的命令
+- **反查冲突预警升级（P1-C'）**：文件反查的多会话标记分级——会话时间窗**重叠**才亮 ⚠ 强标记（并行改动真实风险），先后改动显示弱标记 ×N
+- 索引格式升级（INDEX_VERSION 7→8）：命令条目带 `failed` 字段，首开会自动全量重扫一次
+
 ### 变更
-- 索引格式升级（INDEX_VERSION 6→7）：新增 `changes`（写入/修改/命令清单）与 `editedFiles`（反查索引）字段，升级后首次打开自动全量重扫一次
+- 索引格式升级（INDEX_VERSION 6→7→8）：新增 `changes`（写入/修改/命令清单）与 `editedFiles`（反查索引）字段；命令条目带 `failed`；升级后首次打开自动全量重扫一次
 
 ## [1.4.9] - 2026-10-18
 

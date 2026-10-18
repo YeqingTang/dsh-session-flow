@@ -282,6 +282,18 @@ import { VIEW_SELECTOR, ACTIVE_ATTR } from './shared.js'
     `.sf-filePath{flex:none;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left;font-family:ui-monospace,Consolas,monospace;font-weight:600}`,
     `.sf-fileName{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}`,
     `.sf-fileMulti{flex:none;font-size:10px;color:#b45309;background:rgba(217,119,6,.12);border-radius:999px;padding:0 6px;line-height:16px;font-weight:700}`,
+    `.sf-fileMultiWeak{color:var(--dsw-alias-label-tertiary,#999);background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.08))}`,
+    // P1-A+：diff 卡（红删绿增 + 公共上下文省略）+ 命令失败标红 + 行展开钮。
+    `.sf-changesExp{flex:none;background:none;border:none;cursor:pointer;color:var(--dsw-alias-label-tertiary,#999);font-size:10px;padding:0 2px;line-height:1}`,
+    `.sf-changesExp:hover{color:#4a7dff}`,
+    `.sf-changesFailed{flex:none;color:var(--dsw-alias-state-error-primary,#d43b3b);font-weight:700;font-size:11px}`,
+    `.sf-changesPath.failed{color:var(--dsw-alias-state-error-primary,#d43b3b);text-decoration:line-through rgba(212,59,59,.4)}`,
+    `.sf-diffWrap{margin:2px 0 4px 22px;border-left:2px solid var(--dsw-alias-border-l2,rgba(128,128,128,.3));padding-left:8px}`,
+    `.sf-diffCard{border-radius:6px;background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.06));padding:6px 8px;font-family:ui-monospace,Consolas,monospace;font-size:11px;line-height:1.6;overflow-x:auto;white-space:pre}`,
+    `.sf-diffNew{color:var(--dsw-alias-label-secondary,#555);padding:4px 8px;font-size:11px;font-style:italic}`,
+    `.sf-diffDel{color:#c92a2a;background:rgba(220,53,69,.1)}`,
+    `.sf-diffAdd{color:#2b8a3e;background:rgba(43,138,62,.1)}`,
+    `.sf-diffCtx{color:var(--dsw-alias-label-tertiary,#999);font-style:italic}`,
     `.sf-fulltext .sf-muted{font-size:11px;color:var(--dsw-alias-label-secondary,#666)}`,
     // M12：详情并入右侧栏（details 槽位轻量视图）。
     // 头部布局：标题+按钮**聚左**，spacer 吃掉右侧余量——彻底规避右上角

@@ -57,11 +57,12 @@ import { VIEW_SELECTOR, ACTIVE_ATTR } from './shared.js'
     `html[${ACTIVE_ATTR}]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [data-pane=conversation]>:not(${VIEW_SELECTOR}),html[${ACTIVE_ATTR}]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [class*=centerCol]>:not(${VIEW_SELECTOR}),html[${ACTIVE_ATTR}]:not([data-dsh-taskboard-active]):not([data-dsh-ssh-active]) [data-conversation-region=chat]>:not(${VIEW_SELECTOR}){display:none!important}`,
     // 侧边栏入口：对齐官方 panelRow（dsh-client-ui-sidebar）：min-height 36 /
     // radius-md / padding 7px 8px / margin 0 2px / gap 8px / font inherit（sidebar 14px）/
-    // label-primary 常态色 / interactive-bg-hover 悬停与激活。
+    // label-primary 常态色 / interactive-bg-hover 悬停与激活；glyph 不设固定盒宽，
+    // 图标自然 18px（与官方 panelGlyph 内 18px 图标同宽，文字左边界对齐）。
     `.sf-entry{box-sizing:border-box;width:100%;min-height:36px;color:var(--dsw-alias-label-primary,#222);cursor:pointer;white-space:nowrap;text-align:left;background:0 0;border:none;border-radius:var(--dsw-radius-md,8px);align-items:center;gap:8px;margin:0 2px;padding:7px 8px;line-height:22px;font:inherit;display:flex}`,
     `.sf-entry:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.06))}`,
     `.sf-entry[data-active]{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.06));color:var(--dsw-alias-label-primary,#222)}`,
-    `.sf-entryIcon{flex:none;justify-content:center;align-items:center;display:inline-flex;width:18px;height:18px}`,
+    `.sf-entryIcon{flex:none;justify-content:center;align-items:center;display:inline-flex}`,
     `.sf-entryLabel{text-overflow:ellipsis;overflow:hidden;min-width:0}`,
     `[data-dsh-frame][data-sidebar-collapsed] .sf-entry{justify-content:center;width:36px;height:36px;margin:0;padding:0}`,
     `[data-dsh-frame][data-sidebar-collapsed] .sf-entryLabel{display:none}`,

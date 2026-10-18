@@ -3846,7 +3846,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
   }
 
   // ── 侧边栏入口（DOM 级注入 + 自愈）────────────────────────────────
-  const ICON = `<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 3.5h11M2.5 8h11M2.5 12.5h7"/></svg>`
+  const ICON = `<svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 3.5h11M2.5 8h11M2.5 12.5h7"/></svg>`
   function sidebarRoot() {
     const column = document.querySelector('[data-pane="sidebar"], [class*="sidebarCol"]')
     if (column === null) return undefined
@@ -3877,18 +3877,25 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
   function placeEntry(root, entry) {
     const button = newSessionButton(root)
     if (button === undefined) return false
-    if (entry.parentElement !== root) {
-      const row = button.closest('[class*="logoRow"]')
-      const base = (row !== null && row.parentElement === root) ? row : button
-      const family = Array.from(root.children).filter(
-        (el) => el instanceof HTMLElement && el.matches('[data-dsh-taskboard-entry], [data-dsh-ssh-entry], [data-dsh-session-flow-entry]'),
-      )
-      // 固定插到家族块末尾：taskboard/ssh 各自把「自己」插到家族最前，
-      // 互相抢占会让相对顺序随加载/自愈时序漂移；我们把位置钉在末尾，
-      // 任何时序下都稳定排在最后（顺序：任务看板 → SSH → 会话流）。
-      const last = family.length > 0 ? family[family.length - 1] : base
-      root.insertBefore(entry, last.nextElementSibling)
+    if (entry.parentElement !== null) return true
+    // 对齐官方行：优先插进 panelList 导航容器（与「插件/自动化任务/任务看板」
+    // 同容器同上下文，左边界天然对齐；插在末尾，顺序稳定）。找不到时退回
+    // 根容器旧路径（家族块末尾）。
+    const panelList = root.querySelector('[class*=panelList]')
+    if (panelList !== null) {
+      panelList.appendChild(entry)
+      return true
     }
+    const row = button.closest('[class*="logoRow"]')
+    const base = (row !== null && row.parentElement === root) ? row : button
+    const family = Array.from(root.children).filter(
+      (el) => el instanceof HTMLElement && el.matches('[data-dsh-taskboard-entry], [data-dsh-ssh-entry], [data-dsh-session-flow-entry]'),
+    )
+    // 固定插到家族块末尾：taskboard/ssh 各自把「自己」插到家族最前，
+    // 互相抢占会让相对顺序随加载/自愈时序漂移；我们把位置钉在末尾，
+    // 任何时序下都稳定排在最后（顺序：任务看板 → SSH → 会话流）。
+    const last = family.length > 0 ? family[family.length - 1] : base
+    root.insertBefore(entry, last.nextElementSibling)
     return true
   }
 

@@ -3846,7 +3846,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
   }
 
   // ── 侧边栏入口（DOM 级注入 + 自愈）────────────────────────────────
-  const ICON = `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 3.5h11M2.5 8h11M2.5 12.5h7"/></svg>`
+  const ICON = `<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 3.5h11M2.5 8h11M2.5 12.5h7"/></svg>`
   function sidebarRoot() {
     const column = document.querySelector('[data-pane="sidebar"], [class*="sidebarCol"]')
     if (column === null) return undefined

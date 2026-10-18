@@ -1727,7 +1727,8 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
     // P1-A+：diff 卡展开态（key = 'w'|'e' + ':' + index）。内容直接从已加载回合
     // items 现场解析（diffEntriesFor）；展开时若回合未加载则 ensureTurn 懒拉。
     const [diffOpen, setDiffOpen] = useState(() => new Set())
-    // 行级 diff：公共首尾行裁剪（edit 的 old/new 通常大段相同），中段红删绿增。
+    // 行级 diff：公共首尾行裁剪（edit 的 old/new 通常大段相同），中段红删绿增；
+    // 首尾各留 2 行上下文（纯省略号会丢掉改动所在位置的线索）。
     const diffLinesOf = (oldText, newText) => {
       const a = String(oldText || '').split('\n')
       const b = String(newText || '').split('\n')
@@ -1735,10 +1736,17 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
       while (i < a.length && i < b.length && a[i] === b[i]) i++
       let j = 0
       while (j < a.length - i && j < b.length - i && a[a.length - 1 - j] === b[b.length - 1 - j]) j++
+      const endA = a.length - j || a.length
+      const endB = b.length - j || b.length
+      const headKeep = Math.min(i, 2)
+      const tailKeep = Math.min(j, 2)
       return {
-        head: i, tail: j,
-        removed: a.slice(i, a.length - j || a.length),
-        added: b.slice(i, b.length - j || b.length),
+        headLines: a.slice(i - headKeep, i),
+        headOmitted: i - headKeep,
+        tailLines: a.slice(endA, endA + tailKeep),
+        tailOmitted: j - tailKeep,
+        removed: a.slice(i, endA),
+        added: b.slice(i, endB),
       }
     }
     // 从已加载回合的 items 里找该回合对同一路径的 write/edit 调用（带完整参数）。
@@ -2157,28 +2165,47 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
               h('span', { className: 'sf-statCount err' }, sessionInfo.toolErrors),
             ),
           ),
-            // P1-A 变更清单：本会话写入/修改了哪些文件、跑了哪些命令（默认收拢；
-            // 回合号点击 → 展开并定位该回合）。P1-A+：写入/修改行可展开 diff 卡
-            // （edit 红删绿增 / write「新建 N 行」），命令行失败标红。
+            // P1-A 变更清单：按文件生命周期语义分组（新建/编辑/命令）；默认收拢。
+            // P1-A+：条目可展开 diff 卡（edit 红删绿增 / write 行数卡），卡内固定
+            // 文件头（路径 + 类型徽标 + 回合号），命令行失败标红。
             (() => {
             const ch = (data.session && data.session.changes) || null
             if (!ch) return null
-            const total = (ch.writes || []).length + (ch.edits || []).length + (ch.commands || []).length
+            // 语义分组：新建 = write 且会话内无 read/edit 先例；编辑 = edit + 覆盖 write。
+            const newFiles = (ch.writes || []).filter((w) => w.isNew === true)
+            const editFiles = [...(ch.edits || []).map((e) => ({ ...e, tool: 'edit' })),
+                               ...(ch.writes || []).filter((w) => w.isNew !== true).map((w) => ({ ...w, tool: 'write' }))]
+            const commands = ch.commands || []
+            const total = newFiles.length + editFiles.length + commands.length
             if (total === 0) return null
-            const diffCard = (entry) => {
-              if (entry.isNew) return h('div', { className: 'sf-diffNew' }, STR.diffNewFile.replace('{N}', String(entry.lines)))
+            const diffCard = (entry, item, badge) => {
               const rows = []
-              if (entry.head > 1) rows.push(h('div', { key: 'h', className: 'sf-diffCtx' }, '…'))
-              for (const line of entry.removed) rows.push(h('div', { key: 'r' + rows.length, className: 'sf-diffDel' }, '− ' + line))
-              for (const line of entry.added) rows.push(h('div', { key: 'a' + rows.length, className: 'sf-diffAdd' }, '+ ' + line))
-              if (entry.tail > 1) rows.push(h('div', { key: 't', className: 'sf-diffCtx' }, '…'))
-              return h('div', { className: 'sf-diffCard' }, rows)
+              if (entry.isNew) {
+                // write 卡片：新建/覆盖语义按 item.isNew（host 先例判定）区分文案。
+                const label = item.isNew === false ? STR.diffCoveredFile : STR.diffNewFile
+                rows.push(h('div', { key: 'n', className: 'sf-diffNew' }, label.replace('{N}', String(entry.lines))))
+              } else {
+                for (const line of entry.headLines || []) rows.push(h('div', { key: 'h' + rows.length, className: 'sf-diffCtxLine' }, '  ' + line))
+                if (entry.headOmitted > 0) rows.push(h('div', { key: 'ho', className: 'sf-diffCtx' }, '…'))
+                for (const line of entry.removed) rows.push(h('div', { key: 'r' + rows.length, className: 'sf-diffDel' }, '− ' + line))
+                for (const line of entry.added) rows.push(h('div', { key: 'a' + rows.length, className: 'sf-diffAdd' }, '+ ' + line))
+                if (entry.tailOmitted > 0) rows.push(h('div', { key: 'to', className: 'sf-diffCtx' }, '…'))
+                for (const line of entry.tailLines || []) rows.push(h('div', { key: 't' + rows.length, className: 'sf-diffCtxLine' }, '  ' + line))
+              }
+              return h('div', { className: 'sf-diffCard' },
+                h('div', { className: 'sf-diffHead' },
+                  h('span', { className: 'sf-diffPath', title: item.path }, item.path),
+                  h('span', { className: 'sf-diffBadge' }, badge),
+                  typeof item.turn === 'number' && h('span', { className: 'sf-changesTurn', style: { cursor: 'default' } }, 'T' + item.turn),
+                ),
+                h('div', { className: 'sf-diffBody' }, rows),
+              )
             }
-            const fileRow = (item, i, toolName, keyPrefix) => {
+            const fileRow = (item, i, keyPrefix, toolName, badge) => {
               const key = keyPrefix + ':' + i
               const open = diffOpen.has(key)
               const entries = open ? diffEntriesFor(item.turn, toolName, item.path) : null
-              return h('div', { key: i },
+              return h('div', { key: keyPrefix + i },
                 h('div', { className: 'sf-changesRow' },
                   h('button', { className: 'sf-changesExp', title: STR.diffExpand, onClick: () => toggleDiff(key, item) }, open ? '▾' : '▸'),
                   h('span', { className: 'sf-changesPath', title: item.path }, item.path),
@@ -2193,10 +2220,17 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
                     ? h('div', { className: 'sf-muted' }, STR.diffLoading)
                     : entries.length === 0
                       ? h('div', { className: 'sf-muted' }, STR.diffNone)
-                      : entries.map((entry, j) => h('div', { key: j }, diffCard(entry))),
+                      : entries.map((entry, j) => h('div', { key: j }, diffCard(entry, item, badge))),
                 ),
               )
             }
+            const fileGroup = (title, items, keyPrefix, badgeText) => (
+              items.length > 0 && h('div', { className: 'sf-changesGroup' },
+                h('div', { className: 'sf-changesGroupTitle' }, title + '（' + items.length + '）'),
+                items.map((item, i) => fileRow(item, i, keyPrefix, item.tool || 'write',
+                  item.tool === 'edit' ? STR.badgeEdit : (item.isNew === false ? STR.badgeCovered : badgeText))),
+              )
+            )
             const cmdGroup = (items) => (
               items.length > 0 && h('div', { className: 'sf-changesGroup' },
                 h('div', { className: 'sf-changesGroupTitle' }, STR.changeCmdGroup + '（' + items.length + '）'),
@@ -2214,17 +2248,13 @@ window.__ModuleLoader__.load({ id: 'dsh-session-flow', factory: (require) => {
             return h('div', { className: 'sf-changes', style: { flex: 'none' } },
               h('button', { className: 'sf-changesToggle', onClick: () => setChangesOpen(!changesOpen) },
                 (changesOpen ? '▾ ' : '▸ ') + STR.changes +
-                ' · ' + STR.changeWriteGroup + ' ' + (ch.writes || []).length +
-                ' · ' + STR.changeEditGroup + ' ' + (ch.edits || []).length +
-                ' · ' + STR.changeCmdGroup + ' ' + (ch.commands || []).length),
+                ' · ' + STR.changeWriteGroup + ' ' + newFiles.length +
+                ' · ' + STR.changeEditGroup + ' ' + editFiles.length +
+                ' · ' + STR.changeCmdGroup + ' ' + commands.length),
               changesOpen && h('div', { className: 'sf-changesBody' },
-                (ch.writes || []).length > 0 && h('div', { className: 'sf-changesGroup' },
-                  h('div', { className: 'sf-changesGroupTitle' }, STR.changeWriteGroup + '（' + ch.writes.length + '）'),
-                  ch.writes.map((item, i) => fileRow(item, i, 'write', 'w'))),
-                (ch.edits || []).length > 0 && h('div', { className: 'sf-changesGroup' },
-                  h('div', { className: 'sf-changesGroupTitle' }, STR.changeEditGroup + '（' + ch.edits.length + '）'),
-                  ch.edits.map((item, i) => fileRow(item, i, 'edit', 'e'))),
-                cmdGroup(ch.commands || []),
+                fileGroup(STR.changeWriteGroup, newFiles, 'n', STR.badgeNew),
+                fileGroup(STR.changeEditGroup, editFiles, 'e', STR.badgeEdit),
+                cmdGroup(commands),
               ),
             )
           })(),

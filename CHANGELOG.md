@@ -3,7 +3,7 @@
 本插件所有显著变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [1.5.0] - 2026-10-18
 
 ### 新增
 - **会话变更清单（P1-A）**：详情页统计条下方新增「变更清单」折叠区——本会话**写入文件 / 修改文件 / 执行命令**三组清单（各带回合号，点击回合号展开并定位该回合）；默认收拢，无变更不渲染
@@ -212,7 +212,7 @@
 **其他**
 - 缓存管理面板（索引 + 时间线分类清理，仅限插件私有目录）
 
-[Unreleased]: https://github.com/YeqingTang/dsh-session-flow/compare/v1.4.9...HEAD
+[Unreleased]: https://github.com/YeqingTang/dsh-session-flow/compare/v1.5.0...HEAD
 [0.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v0.1.0
 [1.0.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.0.0
 [1.1.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.1.0
@@ -228,3 +228,4 @@
 [1.4.7]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.7
 [1.4.8]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.8
 [1.4.9]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.4.9
+[1.5.0]: https://github.com/YeqingTang/dsh-session-flow/releases/tag/v1.5.0
